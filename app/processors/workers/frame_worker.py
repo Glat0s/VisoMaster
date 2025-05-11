@@ -855,32 +855,36 @@ class FrameWorker(threading.Thread):
         current_input_cxhxw_float = current_iter_face_hwc_float.permute(2,0,1) # CxHxW, [0,1]
 
         if swapper_model == 'Inswapper128':
-            # Correct input normalization to [0, 1] instead of [-1, 1]
-            input_normalized_cxhxw_float = current_input_cxhxw_float.float() / 255.0
-            
+            # input_face_affined is HWC, float [0,1] (current state for this iteration)
+            # output is HWC, float [0,1] (will store result of this iteration)
             with torch.no_grad():
-                for _ in range(itex):
-                    if dim == 1:  # 128x128 input
-                        swapper_output_128_batched = torch.empty((1, 3, 128, 128), dtype=torch.float32, device=self.models_processor.device)
-                        self.models_processor.run_inswapper(input_normalized_cxhxw_float.unsqueeze(0), latent, swapper_output_128_batched)
-                        model_raw_output_cxhxw_float_0_1 = swapper_output_128_batched.squeeze(0)
-                    else:  # Tiled processing for higher resolutions
-                        temp_output_holder = torch.zeros_like(input_normalized_cxhxw_float)
-                        for j_tile in range(dim):
-                            for i_tile in range(dim):
-                                tile_input = input_normalized_cxhxw_float[:, j_tile*128:(j_tile+1)*128, i_tile*128:(i_tile+1)*128]
-                                tile_output = torch.empty((1, 3, 128, 128), dtype=torch.float32, device=self.models_processor.device)
-                                self.models_processor.run_inswapper(tile_input.unsqueeze(0), latent, tile_output)
-                                temp_output_holder[:, j_tile*128:(j_tile+1)*128, i_tile*128:(i_tile+1)*128] = tile_output.squeeze(0)
-                        model_raw_output_cxhxw_float_0_1 = temp_output_holder
+                for _ in range(itex): # Iterative refinement
+                    for j in range(dim): # Original loop variable j
+                        for i in range(dim): # Original loop variable i
+                            # Strided slicing from input_face_affined_hwc_float (HWC, float [0,1])
+                            input_tile_hwc_0_1 = input_face_affined_hwc_float[j::dim, i::dim, :] 
+                            
+                            # Convert to BCHW, float [0,1] for run_inswapper (as per original logic)
+                            input_tile_bchw_0_1 = input_tile_hwc_0_1.permute(2, 0, 1).unsqueeze(0).contiguous()                            
+                            
+                            # Assuming run_inswapper takes [0,1] and outputs [0,1] (BCHW)
+                            # This matches the behavior of the original frame_worker-orig.py.
+                            swapper_output_tile_bchw_0_1 = torch.empty((1,3,128,128), dtype=torch.float32, device=self.models_processor.device).contiguous()
+                            self.models_processor.run_inswapper(input_tile_bchw_0_1, latent, swapper_output_tile_bchw_0_1)
 
-                    # Remove incorrect output scaling from [-1, 1] to [0, 1]
-                    prev_face_hwc_float_for_strength_blend = current_iter_face_hwc_float.clone()
-                    current_iter_face_hwc_float = model_raw_output_cxhxw_float_0_1.permute(1, 2, 0)  # Directly use model output in [0,1]
-                    current_input_cxhxw_float = current_iter_face_hwc_float.permute(2, 0, 1)
-                    input_normalized_cxhxw_float = current_input_cxhxw_float  # Maintain [0,1] range for next iteration
-                    swapped_face_native_res_cxhxw_float = current_input_cxhxw_float
+                            # Convert output to HWC, float [0,1]
+                            swapper_output_tile_hwc_0_1 = torch.squeeze(swapper_output_tile_bchw_0_1).permute(1, 2, 0) 
+                            
+                            output_placeholder_hwc_float[j::dim, i::dim, :] = swapper_output_tile_hwc_0_1.clone()
+                    
+                    if torch.isnan(output_placeholder_hwc_float).any() or torch.isinf(output_placeholder_hwc_float).any(): break # Error in iteration
+                    
+                    prev_face_hwc_float_for_strength_blend = input_face_affined_hwc_float.clone() # Save HWC [0,1]
 
+                    input_face_affined_hwc_float = output_placeholder_hwc_float.clone() # Update for next iteration HWC [0,1]
+            
+            swapped_face_native_res_cxhxw_float = input_face_affined_hwc_float.permute(2,0,1) # Final result CHW, [0,1]
+            
         elif swapper_model in ('InStyleSwapper256 Version A', 'InStyleSwapper256 Version B', 'InStyleSwapper256 Version C'):
             version = swapper_model[-1]
             with torch.no_grad():
