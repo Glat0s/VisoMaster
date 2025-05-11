@@ -27,6 +27,8 @@ from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
 from app.ui.widgets.face_editor_layout_data import FACE_EDITOR_LAYOUT_DATA
 from app.helpers.miscellaneous import DFM_MODELS_DATA, ParametersDict
 from app.helpers.typing_helper import FacesParametersTypes, ParametersTypes, ControlTypes, MarkerTypes
+from app.helpers.vr_utils import cleanup_temp_dir
+
 
 ParametersWidgetTypes = Dict[str, widget_components.ToggleButton|widget_components.SelectionBox|widget_components.ParameterDecimalSlider|widget_components.ParameterSlider|widget_components.ParameterText]
 
@@ -207,6 +209,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Set face_swap_tab as the default focused tab
         self.tabWidget.setCurrentIndex(0)
         # widget_actions.add_groupbox_and_widgets_from_layout_map(self)
+        self.actionVR180Mode.triggered.connect(self.toggle_vr180_mode)
     def __init__(self):
         super(MainWindow, self).__init__()
         self.setupUi(self)
@@ -255,6 +258,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             case QtCore.Qt.Key_S:
                 self.swapfacesButton.click()
 
+    def toggle_vr180_mode(self):
+        self.control['VR180ModeEnableToggle'] = self.actionVR180Mode.isChecked()
+        # Potentially refresh frame or update UI state if needed
+        common_widget_actions.refresh_frame(self)
+
     def closeEvent(self, event):
         print("MainWindow: closeEvent called.")
 
@@ -264,6 +272,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         save_load_actions.save_current_workspace(self, 'last_workspace.json')
         # Optionally handle the event if needed
+        cleanup_temp_dir()
         event.accept()
 
     def load_last_workspace(self):
@@ -271,6 +280,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         if Path('last_workspace.json').is_file():
             load_dialog = widget_components.LoadLastWorkspaceDialog(self)
             load_dialog.exec_()
+            # After loading workspace, ensure actionVR180Mode reflects loaded control state
+            if self.control.get('VR180ModeEnableToggle', False):
+                self.actionVR180Mode.setChecked(True)
+            else:
+                self.actionVR180Mode.setChecked(False)
 
     def save_last_workspace(self):
         pass

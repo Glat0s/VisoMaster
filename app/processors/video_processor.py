@@ -416,20 +416,68 @@ class VideoProcessor(QObject):
         if Path(self.temp_file).is_file():
             os.remove(self.temp_file)
 
+        # args = [
+            # "ffmpeg",
+            # "-hide_banner",
+            # "-loglevel", "error",
+            # "-f", "rawvideo",             # Specify raw video input
+            # "-pix_fmt", "bgr24",          # Pixel format of input frames
+            # "-s", f"{frame_width}x{frame_height}",  # Frame resolution
+            # "-r", str(self.fps),          # Frame rate
+            # "-i", "pipe:",                # Input from stdin
+            # "-vf", f"pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuvj420p",  # Padding and format conversion            
+            # "-c:v", "libx264",            # H.264 codec
+            # "-crf", "18",                 # Quality setting
+            # self.temp_file                # Output file
+        # ]
+
         args = [
             "ffmpeg",
             "-hide_banner",
-            "-loglevel", "error",
-            "-f", "rawvideo",             # Specify raw video input
-            "-pix_fmt", "bgr24",          # Pixel format of input frames
-            "-s", f"{frame_width}x{frame_height}",  # Frame resolution
-            "-r", str(self.fps),          # Frame rate
-            "-i", "pipe:",                # Input from stdin
-            "-vf", f"pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuvj420p",  # Padding and format conversion            
-            "-c:v", "libx264",            # H.264 codec
-            "-crf", "18",                 # Quality setting
-            self.temp_file                # Output file
+            "-loglevel", "warning",
+
+            # Input 1: Raw video frames from Python via pipe (CPU memory)
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-s", f"{frame_width}x{frame_height}",
+            "-r", str(self.fps),
+            "-i", "pipe:",
+
+            # Video Filtergraph:
+            # 1. Upload BGR frame from CPU to GPU memory
+            # 2. Convert color format on GPU (NVENC often prefers nv12 or p010le for 10-bit)
+            #    For 8-bit YUV 4:2:0, nv12 is common.
+            # Note: The 'format=' filter after hwupload runs on the GPU.
+            "-vf", "format=pix_fmts=nv12,hwupload_cuda",
+
+            # Video Codec: Use NVIDIA HEVC encoder
+            "-c:v", "hevc_nvenc",
+            # Quality Setting: NVENC uses -cq (Constant Quality scale, lower=better, ~18-28 is common range)
+            # Or use -qp (Constant Quantization Parameter)
+            # Or target bitrate: -b:v 60M
+            "-cq", "24", # Experiment with this value
+            # Preset: Controls speed vs quality trade-off for NVENC (e.g., p1-p7, default is p4/p5)
+            # p5=medium, p6=slow, p7=slower (higher quality)
+            "-preset", "p5",
+            # Profile/Level might still be useful
+            # "-profile:v", "main",
+            # "-level:v", "6.2",
+            # Set color properties (NVENC should respect these)
+            "-color_range", "tv",
+            "-colorspace", "bt709",
+            "-color_primaries", "bt709",
+            "-color_trc", "bt709",
+            "-tag:v", "hvc1",
+
+            # Audio Codec: Copy directly
+            "-c:a", "copy",
+
+            # Output File
+            self.temp_file
         ]
+
+
+
 
         self.recording_sp = subprocess.Popen(args, stdin=subprocess.PIPE)
 
