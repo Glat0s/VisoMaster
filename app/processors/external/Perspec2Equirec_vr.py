@@ -108,8 +108,8 @@ class Perspective:
         v_norm = torch.where(is_in_front, rotated_xyz_persp_view[..., 2] / safe_depth_divisor, v_norm)
 
         # Check FOV conditions
-        fov_conditions = (u_norm > -self.w_len) & (u_norm < self.w_len) & \
-                         (v_norm > -self.h_len) & (v_norm < self.h_len)
+        fov_conditions = (u_norm >= -self.w_len) & (u_norm <= self.w_len) & \
+                         (v_norm >= -self.h_len) & (v_norm <= self.h_len)
         
         mask = is_in_front & fov_conditions # H, W boolean tensor
 

@@ -116,27 +116,34 @@ class PerspectiveConverter:
         # mask_torch_original_shape: (1, H, W) boolean, indicating valid warped pixels.
         equirect_component_torch, mask_torch_original_shape = p2e_instance.GetEquirec(self.orig_height, self.orig_width)
 
-        # Apply eye-specific masking (zero out the irrelevant half)
-        equirect_component_eye_masked_torch = equirect_component_torch.clone()
+        # Create eye region mask (1, H, W) to define the current eye's hemisphere
+        eye_region_mask = torch.zeros_like(mask_torch_original_shape, dtype=torch.bool) 
         half_width = self.orig_width // 2
         if is_left_eye:
-            equirect_component_eye_masked_torch[:, :, half_width:] = 0
+            eye_region_mask[:, :, :half_width] = True
         else:
-            equirect_component_eye_masked_torch[:, :, :half_width] = 0
+            eye_region_mask[:, :, half_width:] = True
 
-        feathered_mask_torch_float_1hw = self._apply_feathering(mask_torch_original_shape) # Returns 1HW float
+        # Apply eye region mask to the original projection mask to make it eye-specific
+        eye_specific_mask_torch_original_shape = mask_torch_original_shape & eye_region_mask
+
+        # Feather the eye-specific mask
+        feathered_mask_torch_float_1hw = self._apply_feathering(eye_specific_mask_torch_original_shape) # Returns 1HW float
 
         target_equirect_float = target_equirect_torch_cxhxw_rgb_uint8.float() / 255.0
-        equirect_component_float = equirect_component_eye_masked_torch.float() / 255.0
+
+        # Use the original, non-eye-masked equirect_component_torch for pixel data
+        equirect_component_float = equirect_component_torch.float() / 255.0
 
         # feathered_mask_torch_float_1hw is (1, H, W), can be broadcast with (C, H, W)
         composite_float = target_equirect_float * (1.0 - feathered_mask_torch_float_1hw) + \
                           equirect_component_float * feathered_mask_torch_float_1hw
 
-        # Use the original (non-feathered) mask for direct replacement areas
-        # mask_torch_original_shape is (1, H, W) boolean
+
+        # Use the eye-specific (non-feathered) mask for direct replacement areas
+        # eye_specific_mask_torch_original_shape is (1, H, W) boolean
         # Expand to (C, H, W) for torch.where
-        mask_for_where = mask_torch_original_shape.expand_as(target_equirect_float)
+        mask_for_where = eye_specific_mask_torch_original_shape.expand_as(target_equirect_float)
         
         final_blended_float = torch.where(mask_for_where, composite_float, target_equirect_float)
         
@@ -144,10 +151,10 @@ class PerspectiveConverter:
 
         # Explicitly delete intermediate tensors if memory is tight, though Python's GC + PyTorch should handle it.
         del p2e_instance, equirect_component_torch, mask_torch_original_shape
-        del equirect_component_eye_masked_torch, feathered_mask_torch_float_1hw
+        del eye_region_mask, eye_specific_mask_torch_original_shape 
+        del feathered_mask_torch_float_1hw
         del target_equirect_float, equirect_component_float, composite_float, mask_for_where, final_blended_float
  
-
 def cleanup_temp_dir():
     import shutil
     if os.path.exists(TEMP_DIR_VR):
