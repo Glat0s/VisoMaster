@@ -3,8 +3,6 @@ import cv2
 import numpy as np
 import cupy as cp # Ensure visomaster environment has cupy
 from PIL import Image
-from cupyx.scipy import ndimage as cupy_ndi
-
 
 # Assuming Equirec2Perspec_vr and Perspec2Equirec_vr are in app.processors.external
 from app.processors.external.Equirec2Perspec_vr import Equirectangular as E2P_Equirectangular
@@ -73,15 +71,9 @@ class PerspectiveConverter:
         # and thus a wider feather, but ksize=3 is standard.
         gradient_x = cv2.Sobel(mask_np, cv2.CV_64F, 1, 0, ksize=3)
         gradient_y = cv2.Sobel(mask_np, cv2.CV_64F, 0, 1, ksize=3)
-        
+
         gradient_magnitude_np = np.sqrt(gradient_x ** 2 + gradient_y ** 2)
         gradient_magnitude_cp = cp.asarray(gradient_magnitude_np)
-
-        # CV_64F implies float64, ensure mask_float_cp is float32 if that's sufficient
-        gradient_x_cp = cupy_ndi.sobel(mask_float_cp, axis=1, mode='reflect') # dx, output is float32 if input is
-        gradient_y_cp = cupy_ndi.sobel(mask_float_cp, axis=0, mode='reflect') # dy
-        
-        gradient_magnitude_cp = cp.sqrt(gradient_x_cp**2 + gradient_y_cp**2)
         
         max_grad = cp.amax(gradient_magnitude_cp)
         if max_grad < 1e-5: # Use a small epsilon to handle near-zero gradients
