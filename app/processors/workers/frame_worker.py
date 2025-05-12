@@ -110,7 +110,8 @@ class FrameWorker(threading.Thread):
             control_global['DetectorModelSelection'],
             max_num=1, # Assuming one primary face per targeted crop
             score=control_global['DetectorScoreSlider'] / 100.0,
-            input_size=(perspective_crop_torch_rgb_uint8.shape[2], perspective_crop_torch_rgb_uint8.shape[1]), # W, H
+            #input_size=(perspective_crop_torch_rgb_uint8.shape[2], perspective_crop_torch_rgb_uint8.shape[1]), # W, H
+            input_size=(512, 512), # Use fixed H, W hint, e.g. (H_crop, W_crop) or (512,512)
             use_landmark_detection=control_global['LandmarkDetectToggle'],
             landmark_detect_mode=control_global['LandmarkDetectModelSelection'],
             landmark_score=control_global["LandmarkDetectScoreSlider"]/100.0,
@@ -224,7 +225,8 @@ class FrameWorker(threading.Thread):
                 control['DetectorModelSelection'],
                 max_num=control['MaxFacesToDetectSlider'],
                 score=control['DetectorScoreSlider']/100.0,
-                input_size=(img_numpy_rgb_uint8.shape[0], img_numpy_rgb_uint8.shape[1]), # H, W
+                #input_size=(img_numpy_rgb_uint8.shape[0], img_numpy_rgb_uint8.shape[1]), # H, W
+                input_size=(512, 512), # Use a fixed H, W hint, e.g., (512,512) or (640,640)
                 use_landmark_detection=control['LandmarkDetectToggle'],
                 landmark_detect_mode=control['LandmarkDetectModelSelection'],
                 landmark_score=control["LandmarkDetectScoreSlider"]/100.0,
