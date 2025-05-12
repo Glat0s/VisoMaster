@@ -1,8 +1,10 @@
 import os
 import cv2
 import numpy as np
-import cupy as cp # Ensure visomaster environment has cupy
+import torch
+import torch.nn.functional as F
 from PIL import Image
+
 
 # Assuming Equirec2Perspec_vr and Perspec2Equirec_vr are in app.processors.external
 from app.processors.external.Equirec2Perspec_vr import Equirectangular as E2P_Equirectangular
@@ -10,153 +12,141 @@ from app.processors.external.Perspec2Equirec_vr import Perspective as P2E_Perspe
 
 TEMP_DIR_VR = ".vr_temp_processing" # Define a temporary directory for VR processing files
 
+
+def _get_sobel_kernels(device):
+    sobel_x_kernel = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]], device=device, dtype=torch.float32).reshape(1, 1, 3, 3)
+    sobel_y_kernel = torch.tensor([[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]], device=device, dtype=torch.float32).reshape(1, 1, 3, 3)
+    return sobel_x_kernel, sobel_y_kernel
+
 class EquirectangularConverter:
-    def __init__(self, equirect_image_data_rgb_uint8: np.ndarray):
+    def __init__(self, equirect_image_data_rgb_uint8: np.ndarray, device: torch.device):
         """
         Initializes with equirectangular image data.
         :param equirect_image_data_rgb_uint8: NumPy array (H, W, C) in RGB, uint8 format.
+        :param device: PyTorch device to use.
         """
         os.makedirs(TEMP_DIR_VR, exist_ok=True)
-        self.equirect_image_bgr_uint8 = equirect_image_data_rgb_uint8[..., ::-1] # RGB to BGR
-        self.height, self.width = self.equirect_image_bgr_uint8.shape[:2]
-        # The E2P_Equirectangular class takes image data directly now
-        self.e2p_instance = E2P_Equirectangular(self.equirect_image_bgr_uint8)
+        self.device = device
+        # Convert NumPy HWC RGB to Torch CHW RGB tensor on GPU
+        self.equirect_tensor_cxhxw_rgb_uint8 = torch.from_numpy(
+            equirect_image_data_rgb_uint8
+        ).permute(2,0,1).to(self.device)
+        
+        self.channels, self.height, self.width = self.equirect_tensor_cxhxw_rgb_uint8.shape
+        self.e2p_instance = E2P_Equirectangular(self.equirect_tensor_cxhxw_rgb_uint8)
 
     def calculate_theta_phi_from_bbox(self, bbox_np: np.ndarray):
         x1, y1, x2, y2 = map(int, bbox_np)
         x_center = (x1 + x2) / 2
         y_center = (y1 + y2) / 2
         
-        # Normalize coordinates: x to [-1, 1], y to [-1, 1] (from top to bottom)
-        # Theta (longitude) from x, Phi (latitude) from y
-        # Equirectangular width corresponds to 360 degrees, height to 180 degrees
-        # For theta: 0 at center, -180 at left edge, +180 at right edge
-        # For phi: 0 at equator (vertical center), +90 at top pole, -90 at bottom pole
-        
         theta = (x_center / self.width - 0.5) * 360.0
         phi = -(y_center / self.height - 0.5) * 180.0 # Negative because image y is top-to-bottom
 
         return theta, phi
 
-    def get_perspective_crop(self, FOV: float, THETA: float, PHI: float, height: int, width: int) -> np.ndarray:
+    def get_perspective_crop(self, FOV: float, THETA: float, PHI: float, height: int, width: int) -> torch.Tensor:
         """
-        Returns a perspective crop as a NumPy array (H, W, C) in BGR, uint8 format.
+        Returns a perspective crop as a Torch tensor (C, H, W) in RGB, uint8 format, on GPU.
         """
-        # GetPerspective returns a BGR numpy array
-        persp_bgr = self.e2p_instance.GetPerspective(FOV, THETA, PHI, height, width)
-        return persp_bgr
+        # E2P_Equirectangular.GetPerspective now returns a Torch tensor (CHW, RGB, uint8)
+        persp_torch_cxhxw_rgb_uint8 = self.e2p_instance.GetPerspective(FOV, THETA, PHI, height, width)
+        return persp_torch_cxhxw_rgb_uint8
 
 
 class PerspectiveConverter:
-    def __init__(self, base_equirect_image_data_rgb_uint8: np.ndarray):
+    def __init__(self, base_equirect_image_data_rgb_uint8: np.ndarray, device: torch.device):
         """
         Initializes with the base equirectangular image data (used for dimensions and as background).
         :param base_equirect_image_data_rgb_uint8: NumPy array (H, W, C) in RGB, uint8 format.
+        :param device: PyTorch device to use.
         """
         os.makedirs(TEMP_DIR_VR, exist_ok=True)
-        self.base_equirect_bgr_uint8 = base_equirect_image_data_rgb_uint8[..., ::-1].copy() # RGB to BGR
-        self.orig_height, self.orig_width = self.base_equirect_bgr_uint8.shape[:2]
-    
-    def _apply_feathering(self, mask_cp: cp.ndarray) -> cp.ndarray:
-        """ Applies feathering to a CuPy mask. Identical to vrswap's convert.py logic. """
 
-        # Ensure mask_cp is float for gradient calculation
-        mask_float_cp = mask_cp.astype(cp.float32)
-        if mask_float_cp.ndim == 3 and mask_float_cp.shape[2] == 1:
-            mask_float_cp = mask_float_cp.squeeze(axis=2) # Make it 2D if it's HxWx1
+        self.device = device
+        # Convert NumPy HWC RGB to Torch CHW RGB tensor on GPU
+        self.base_equirect_tensor_cxhxw_rgb_uint8 = torch.from_numpy(
+            base_equirect_image_data_rgb_uint8
+        ).permute(2,0,1).to(self.device)
+        self.orig_channels, self.orig_height, self.orig_width = self.base_equirect_tensor_cxhxw_rgb_uint8.shape
+        self.sobel_x_kernel, self.sobel_y_kernel = _get_sobel_kernels(self.device)
 
-        mask_np = cp.asnumpy(mask_float_cp) # Convert to numpy for Sobel
-        
-        # Using a slightly larger ksize for Sobel might give a smoother gradient
-        # and thus a wider feather, but ksize=3 is standard.
-        gradient_x = cv2.Sobel(mask_np, cv2.CV_64F, 1, 0, ksize=3)
-        gradient_y = cv2.Sobel(mask_np, cv2.CV_64F, 0, 1, ksize=3)
+    def _apply_feathering(self, mask_torch: torch.Tensor) -> torch.Tensor:
+        """ Applies feathering to a Torch mask.
+        :param mask_torch: Torch tensor (1, H, W) or (H, W), boolean or float, on GPU.
+        :return: Feathered mask as Torch tensor (1, H, W), float, on GPU.
+        """
+        mask_float_torch = mask_torch.float()
+        if mask_float_torch.ndim == 2: # HW
+            mask_float_torch = mask_float_torch.unsqueeze(0) # 1HW
+        if mask_float_torch.ndim == 3 and mask_float_torch.shape[0] != 1 : # CHW but C != 1
+             mask_float_torch = mask_float_torch[0:1,:,:] # Take first channel
 
-        gradient_magnitude_np = np.sqrt(gradient_x ** 2 + gradient_y ** 2)
-        gradient_magnitude_cp = cp.asarray(gradient_magnitude_np)
-        
-        max_grad = cp.amax(gradient_magnitude_cp)
+        # Add batch dimension for conv2d: (1, 1, H, W)
+        mask_batch_channel = mask_float_torch.unsqueeze(0)
+
+        gradient_x = F.conv2d(mask_batch_channel, self.sobel_x_kernel, padding=1)
+        gradient_y = F.conv2d(mask_batch_channel, self.sobel_y_kernel, padding=1)
+
+        gradient_magnitude = torch.sqrt(gradient_x**2 + gradient_y**2)
+        max_grad = torch.max(gradient_magnitude)
+
         if max_grad < 1e-5: # Use a small epsilon to handle near-zero gradients
-            # If no gradient, it means the mask is either all 0s or all 1s (or flat).
-            # Return the original float mask.
-            # If mask_float_cp was all zeros, this returns all zeros. If all ones, returns all ones.
-            return mask_float_cp 
+            return mask_float_torch # Return original 1HW float mask
 
-        feathered_mask_cp = 1.0 - gradient_magnitude_cp / max_grad
-        return feathered_mask_cp
+        feathered_mask_batch = 1.0 - gradient_magnitude / max_grad
+
+        return feathered_mask_batch.squeeze(0) # Return 1HW float mask
 
 
     def stitch_single_perspective(self,
-                                  target_equirect_bgr: np.ndarray,
-                                  processed_crop_bgr_uint8: np.ndarray,
+                                  target_equirect_torch_cxhxw_rgb_uint8: torch.Tensor,
+                                  processed_crop_torch_cxhxw_rgb_uint8: torch.Tensor,
                                   theta: float, phi: float, fov: float,
                                   is_left_eye: bool):
         """
         Stitches a single processed perspective crop back into the target equirectangular image.
-        Modifies target_equirect_bgr in place.
+        Modifies target_equirect_torch_cxhxw_rgb_uint8 in place.
+        Assumes all tensors are on self.device.
         """
 
-        p2e_instance = P2E_Perspective(processed_crop_bgr_uint8, FOV=fov, THETA=theta, PHI=phi)
-        try:
-            # GetEquirec returns NumPy arrays:
-            # equirect_component_numpy: (H, W, C) BGR uint8, the processed crop warped to equirectangular space.
-            # mask_numpy_original_shape: (H, W, 1) boolean, indicating valid warped pixels.
-            equirect_component_numpy, mask_numpy_original_shape = p2e_instance.GetEquirec(self.orig_height, self.orig_width)
-            # mask_cp_original_shape is likely (H, W) or (H, W, 1) and boolean
-            # Make a copy for eye-specific masking
-            equirect_component_np_bgr = equirect_component_numpy.copy()
-            # Apply eye-specific masking (zero out the irrelevant half)
-            half_width = self.orig_width // 2
-            if is_left_eye:
-                equirect_component_np_bgr[:, half_width:] = 0
-            else: 
-                equirect_component_np_bgr[:, :half_width] = 0
-            
-            equirect_component_cp = cp.asarray(equirect_component_np_bgr)
-            mask_original_cp = cp.asarray(mask_numpy_original_shape) # This is (H,W,1) boolean CuPy array
+        p2e_instance = P2E_Perspective(processed_crop_torch_cxhxw_rgb_uint8, FOV=fov, THETA=theta, PHI=phi)
+        # GetEquirec returns Torch tensors:
+        # equirect_component_torch: (C, H, W) RGB uint8, the processed crop warped to equirectangular space.
+        # mask_torch_original_shape: (1, H, W) boolean, indicating valid warped pixels.
+        equirect_component_torch, mask_torch_original_shape = p2e_instance.GetEquirec(self.orig_height, self.orig_width)
 
-            feathered_mask_cp_float = self._apply_feathering(mask_original_cp) # _apply_feathering expects a CuPy array
-            
-            target_equirect_cp = cp.asarray(target_equirect_bgr)
+        # Apply eye-specific masking (zero out the irrelevant half)
+        equirect_component_eye_masked_torch = equirect_component_torch.clone()
+        half_width = self.orig_width // 2
+        if is_left_eye:
+            equirect_component_eye_masked_torch[:, :, half_width:] = 0
+        else:
+            equirect_component_eye_masked_torch[:, :, :half_width] = 0
 
-            if target_equirect_cp.dtype == cp.uint8:
-                target_equirect_cp = target_equirect_cp.astype(cp.float32) / 255.0
-            if equirect_component_cp.dtype == cp.uint8:
-                equirect_component_cp = equirect_component_cp.astype(cp.float32) / 255.0
+        feathered_mask_torch_float_1hw = self._apply_feathering(mask_torch_original_shape) # Returns 1HW float
 
-            # Ensure feathered_mask_cp_float is broadcastable for 3 channels (H, W, 1)
-            if feathered_mask_cp_float.ndim == 2:
-                feathered_mask_cp_float = feathered_mask_cp_float[..., cp.newaxis]
-            
-            # Ensure feathered_mask_cp_float is explicitly float32 for safety in arithmetic
-            feathered_mask_cp_float = feathered_mask_cp_float.astype(cp.float32)
-            composite_cp = target_equirect_cp * (1.0 - feathered_mask_cp_float) + \
-                           equirect_component_cp * feathered_mask_cp_float
-            
-            if mask_original_cp.ndim == 3 and mask_original_cp.shape[2] == 1:
-                mask_for_indexing_cp = mask_original_cp.squeeze(axis=2) 
-            elif mask_original_cp.ndim == 2: 
-                mask_for_indexing_cp = mask_original_cp 
-            else:
-                raise ValueError(f"Unexpected mask shape for indexing: {mask_original_cp.shape}")
+        target_equirect_float = target_equirect_torch_cxhxw_rgb_uint8.float() / 255.0
+        equirect_component_float = equirect_component_eye_masked_torch.float() / 255.0
 
-            target_equirect_cp[mask_for_indexing_cp] = composite_cp[mask_for_indexing_cp]
-            final_result_np = cp.asnumpy(cp.clip(target_equirect_cp * 255.0, 0, 255).astype(cp.uint8))
-            
-            # Explicitly delete CuPy arrays created in this scope
-            del equirect_component_cp, mask_original_cp, feathered_mask_cp_float
-            del target_equirect_cp, composite_cp
-            if 'mask_for_indexing_cp' in locals(): # It might not be created if mask_original_cp is already 2D
-                del mask_for_indexing_cp
-                        
-            target_equirect_bgr[:] = final_result_np
-        finally:
-            # Explicitly delete the instance to help with GPU memory cleanup
-            if 'p2e_instance' in locals() and p2e_instance is not None:
-                if hasattr(p2e_instance, '_img') and isinstance(p2e_instance._img, cp.ndarray):
-                    del p2e_instance._img # Attempt to delete internal CuPy array
-                del p2e_instance
+        # feathered_mask_torch_float_1hw is (1, H, W), can be broadcast with (C, H, W)
+        composite_float = target_equirect_float * (1.0 - feathered_mask_torch_float_1hw) + \
+                          equirect_component_float * feathered_mask_torch_float_1hw
 
+        # Use the original (non-feathered) mask for direct replacement areas
+        # mask_torch_original_shape is (1, H, W) boolean
+        # Expand to (C, H, W) for torch.where
+        mask_for_where = mask_torch_original_shape.expand_as(target_equirect_float)
+        
+        final_blended_float = torch.where(mask_for_where, composite_float, target_equirect_float)
+        
+        target_equirect_torch_cxhxw_rgb_uint8[:] = (torch.clamp(final_blended_float * 255.0, 0, 255)).byte()
+
+        # Explicitly delete intermediate tensors if memory is tight, though Python's GC + PyTorch should handle it.
+        del p2e_instance, equirect_component_torch, mask_torch_original_shape
+        del equirect_component_eye_masked_torch, feathered_mask_torch_float_1hw
+        del target_equirect_float, equirect_component_float, composite_float, mask_for_where, final_blended_float
+ 
 
 def cleanup_temp_dir():
     import shutil

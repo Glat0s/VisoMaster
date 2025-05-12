@@ -1,138 +1,143 @@
 import cv2
-import cupy as cp
-import cupyx.scipy.ndimage as ndi
 import numpy as np
+import torch
+import torch.nn.functional as F
 from functools import lru_cache
 
-class Perspective:
-    def __init__(self, img_name_or_data, FOV, THETA, PHI):
 
-        if isinstance(img_name_or_data, str): 
-            self._img = cv2.imread(img_name_or_data, cv2.IMREAD_COLOR) 
-        elif isinstance(img_name_or_data, np.ndarray): 
-            self._img = img_name_or_data # Assuming it's already BGR 
-        else: 
-            raise ValueError("Input must be a file path or a NumPy array.") 
- 
-        self._img = cp.asarray(self._img)
-        self._width, self._height, _ = self._img.shape
+# This function should be at the module level
+@lru_cache(maxsize=None) # Cache based on THETA_deg, PHI_deg, device_str
+def _get_rotation_matrices_cached(THETA_deg: float, PHI_deg: float, device_str: str):
+    """
+    Calculates and caches rotation matrices.
+    THETA_deg, PHI_deg are in degrees.
+    device_str is the string representation of the torch device.
+    """
+    device = torch.device(device_str)
+    y_axis_np = np.array([0.0, 1.0, 0.0], np.float32)
+    z_axis_np = np.array([0.0, 0.0, 1.0], np.float32)
+
+    # Convert degrees to radians for Rodrigues
+    theta_rad_val = np.radians(THETA_deg)
+    phi_rad_val = np.radians(PHI_deg)
+
+    R1_np, _ = cv2.Rodrigues(z_axis_np * theta_rad_val)
+    rotated_y_axis_np = np.dot(R1_np, y_axis_np)
+    # PHI is up/down angle. Negative PHI in Rodrigues often means rotating "upwards" from XY plane around the new Y.
+    R2_np, _ = cv2.Rodrigues(rotated_y_axis_np * -phi_rad_val)
+
+    R1_inv_torch = torch.from_numpy(np.linalg.inv(R1_np)).float().to(device)
+    R2_inv_torch = torch.from_numpy(np.linalg.inv(R2_np)).float().to(device)
+    return R1_inv_torch, R2_inv_torch
+
+class Perspective:
+    def __init__(self, img_tensor_cxhxw_rgb_uint8: torch.Tensor, FOV: float, THETA: float, PHI: float):
+        """
+        Initializes with a perspective image tensor.
+        :param img_tensor_cxhxw_rgb_uint8: Torch tensor (C, H, W) in RGB, uint8 format, on GPU.
+        """
+        if not isinstance(img_tensor_cxhxw_rgb_uint8, torch.Tensor):
+            raise ValueError("Input must be a PyTorch tensor.")
+        if img_tensor_cxhxw_rgb_uint8.ndim != 3:
+            raise ValueError("Input tensor must be 3-dimensional (C, H, W).")
+
+        self._img_tensor_cxhxw_rgb_float = img_tensor_cxhxw_rgb_uint8.float() / 255.0 # Normalize to [0,1]
+        self.device = img_tensor_cxhxw_rgb_uint8.device
+        self._channels, self._height, self._width = self._img_tensor_cxhxw_rgb_float.shape
+
+        # Store original THETA, PHI degrees and device string for caching rotation matrices
+        self.THETA_deg_for_cache = THETA
+        self.PHI_deg_for_cache = PHI
+        self.device_str_for_cache = str(self.device)
 
         self._init_params(FOV, THETA, PHI)
 
     def _init_params(self, FOV, THETA, PHI):
         self.wFOV = FOV
-        self.THETA = THETA
-        self.PHI = PHI
-        self.hFOV = float(self._height) / self._width * FOV
-        self.w_len = cp.tan(cp.radians(self.wFOV / 2.0))
-        self.h_len = cp.tan(cp.radians(self.hFOV / 2.0))
+        self.THETA_rad = torch.deg2rad(torch.tensor(THETA, device=self.device, dtype=torch.float32))
+        self.PHI_rad = torch.deg2rad(torch.tensor(PHI, device=self.device, dtype=torch.float32))
+        self.hFOV = float(self._height) / float(self._width) * FOV
+        self.w_len = torch.tan(torch.deg2rad(torch.tensor(self.wFOV / 2.0, device=self.device)))
+        self.h_len = torch.tan(torch.deg2rad(torch.tensor(self.hFOV / 2.0, device=self.device)))
 
-        self.R1, self.R2 = self._calc_rotation_matrices()
-
-    @lru_cache(maxsize=None)
-    def _calc_rotation_matrices(self):
-        y_axis = cp.array([0.0, 1.0, 0.0], cp.float32)
-        z_axis = cp.array([0.0, 0.0, 1.0], cp.float32)
-
-        [R1, _] = cv2.Rodrigues(cp.asnumpy(z_axis * cp.radians(self.THETA)))
-        [R2, _] = cv2.Rodrigues(cp.asnumpy(cp.dot(cp.asarray(R1), y_axis) * cp.radians(-self.PHI)))
-
-        R1 = cp.asarray(cp.linalg.inv(cp.asarray(R1)))
-        R2 = cp.asarray(cp.linalg.inv(cp.asarray(R2)))
-
-        return R1, R2
+        # Call the new module-level cached function
+        self.R1, self.R2 = _get_rotation_matrices_cached(
+            self.THETA_deg_for_cache,
+            self.PHI_deg_for_cache,
+            self.device_str_for_cache
+        )
 
     def SetParameters(self, FOV, THETA, PHI):
         self._init_params(FOV, THETA, PHI)
 
-    def GetEquirec(self, height, width):
-        x, y = cp.meshgrid(cp.linspace(-180, 180, width, dtype=cp.float32), cp.linspace(90, -90, height, dtype=cp.float32))
+    def GetEquirec(self, height: int, width: int) -> tuple[torch.Tensor, torch.Tensor]:
+        # Create equirectangular grid
+        equ_lon_coords = torch.linspace(-180, 180, width, device=self.device, dtype=torch.float32)
+        equ_lat_coords = torch.linspace(90, -90, height, device=self.device, dtype=torch.float32)
+        equ_lon_grid, equ_lat_grid = torch.meshgrid(equ_lon_coords, equ_lat_coords, indexing='xy') # Note: meshgrid indexing
 
-        xyz = cp.zeros((height, width, 3), dtype=cp.float32)
-        xyz[..., 0] = cp.cos(cp.radians(x)) * cp.cos(cp.radians(y))
-        xyz[..., 1] = cp.sin(cp.radians(x)) * cp.cos(cp.radians(y))
-        xyz[..., 2] = cp.sin(cp.radians(y))
-
-        xyz = xyz.reshape([height * width, 3]).T
-        xyz = cp.dot(self.R2, xyz)
-        xyz = cp.dot(self.R1, xyz).T
-        xyz = xyz.reshape([height, width, 3])
-        #xyz /= xyz[..., 0, None]
-
-        #conditions = (-self.w_len < xyz[..., 1]) & (xyz[..., 1] < self.w_len) & (-self.h_len < xyz[..., 2]) & (xyz[..., 2] < self.h_len)
-
-        # Check if points are in front of the perspective camera's image plane.
-        # xyz[..., 0] is the component along the camera's principal axis (depth).
-        # Use a small epsilon to avoid issues with points exactly on the plane.
-        is_in_front = xyz[..., 0] > 1e-5
-
-        #lon_map = (xyz[..., 1] + self.w_len) / (2 * self.w_len) * self._width
-        #lat_map = (-xyz[..., 2] + self.h_len) / (2 * self.h_len) * self._height
-
-        # Initialize normalized screen coordinates (u, v) to a value that will be out of FOV.
-        # Using cp.inf ensures they fail the w_len/h_len check if not properly updated.
-        normalized_screen_x = cp.full_like(xyz[..., 1], cp.inf, dtype=cp.float32)
-        normalized_screen_y = cp.full_like(xyz[..., 2], cp.inf, dtype=cp.float32)
-
-        # Perform depth normalization only for points in front of the camera.
-        # Safe divisor: xyz[..., 0] where it's in_front, 1.0 otherwise (to avoid div by zero/NaN).
-        # The .squeeze() is important if xyz[..., 0, None] was used, but here xyz[..., 0] is already (H,W)
-        safe_depth_divisor = cp.where(is_in_front, xyz[..., 0], 1.0)
-
-        # Calculate normalized screen coordinates (u = x'/z', v = y'/z')
-        normalized_screen_x = cp.where(is_in_front, xyz[..., 1] / safe_depth_divisor, cp.inf)
-        normalized_screen_y = cp.where(is_in_front, xyz[..., 2] / safe_depth_divisor, cp.inf)
-
-        # Check for NaN/Inf in normalized screen coordinates
-        if cp.isnan(normalized_screen_x).any() or cp.isinf(normalized_screen_x).any() or \
-           cp.isnan(normalized_screen_y).any() or cp.isinf(normalized_screen_y).any():
-            # This case should ideally be rare due to cp.inf initialization and safe_depth_divisor
-            # If it happens, force these to be out of FOV for safety
-            normalized_screen_x = cp.where(cp.isfinite(normalized_screen_x), normalized_screen_x, cp.inf)
-            normalized_screen_y = cp.where(cp.isfinite(normalized_screen_y), normalized_screen_y, cp.inf)
-
-        # Conditions for being within FOV, using the normalized screen coordinates
-        fov_conditions = cp.isfinite(normalized_screen_x) & cp.isfinite(normalized_screen_y) & \
-                         (-self.w_len < normalized_screen_x) & \
-                         (normalized_screen_x < self.w_len) & \
-                         (-self.h_len < normalized_screen_y) & \
-                         (normalized_screen_y < self.h_len)
-
-        # The final mask: must be in front of camera AND within its FOV
-        conditions = is_in_front & fov_conditions
-
-        # Map these normalized screen coordinates to pixel coordinates in the perspective image
-        lon_map = (normalized_screen_x + self.w_len) / (2 * self.w_len) * self._width
-        lat_map = (-normalized_screen_y + self.h_len) / (2 * self.h_len) * self._height
-
-        # Ensure lat_map and lon_map are finite where conditions are true.
-        # Where conditions are false, map_coordinates will use 0,0 which should be fine if self._img is valid there.
-        # Or, more robustly, map to a known safe coordinate or handle fill_value in map_coordinates if available.
-        # For now, we rely on `persp *= mask` later.
-        safe_lat_map = cp.where(conditions & cp.isfinite(lat_map), lat_map, 0.0)
-        safe_lon_map = cp.where(conditions & cp.isfinite(lon_map), lon_map, 0.0)
-        coordinates = cp.stack([safe_lat_map, safe_lon_map], axis=0).astype(cp.float32)
-
-        # Explicitly delete intermediate large CuPy arrays to free GPU memory sooner
-        del x, y, xyz, safe_depth_divisor
-        del normalized_screen_x, normalized_screen_y
-        del lon_map, lat_map, safe_lat_map, safe_lon_map
-        # 'conditions' is still needed for the mask
-
-        persp = cp.empty((height, width, self._img.shape[2]), dtype=self._img.dtype)
-        for i in range(self._img.shape[2]):
-            ndi.map_coordinates(self._img[..., i], coordinates, output=persp[..., i], order=1, mode='nearest')
-
-        del coordinates # Delete after use
-
-        mask = conditions[..., cp.newaxis]  # Compute mask
-        persp *= mask  # Apply mask to persp
+        # Convert equirectangular (lon, lat) to 3D Cartesian unit vectors
+        lon_rad = torch.deg2rad(equ_lon_grid)
+        lat_rad = torch.deg2rad(equ_lat_grid)
         
-        del conditions # Delete after use
+        x_3d = torch.cos(lat_rad) * torch.cos(lon_rad)
+        y_3d = torch.cos(lat_rad) * torch.sin(lon_rad)
+        z_3d = torch.sin(lat_rad)
+        xyz_equ_norm = torch.stack((x_3d, y_3d, z_3d), dim=2) # H, W, 3
 
-        return cp.asnumpy(persp), cp.asnumpy(mask)
+        # Rotate these 3D points (from equirect space to perspective camera's view space)
+        xyz_flat = xyz_equ_norm.reshape(-1, 3).T # (3, H*W)
+        # R1, R2 are inverse rotations from _calc_rotation_matrices
+        rotated_xyz_flat = self.R1 @ self.R2 @ xyz_flat # Order might need R2 @ R1 depending on convention
+        rotated_xyz_persp_view = rotated_xyz_flat.T.reshape(height, width, 3) # H, W, 3
 
-    def resetDevice():
-        #device = cuda.get_current_device()
-        device = cp.cuda.get_current_device()
-        device.reset()
+        # Perspective projection: u = x'/z', v = y'/z'
+        # rotated_xyz_persp_view[..., 0] is depth (along camera's X-axis)
+        # rotated_xyz_persp_view[..., 1] is horizontal screen coord
+        # rotated_xyz_persp_view[..., 2] is vertical screen coord
+        depth_val = rotated_xyz_persp_view[..., 0]
+        is_in_front = depth_val > 1e-5 # Points in front of the camera
+
+        # Normalized screen coordinates (relative to camera's principal axis)
+        # Initialize with out-of-FOV values
+        u_norm = torch.full_like(depth_val, float('inf'))
+        v_norm = torch.full_like(depth_val, float('inf'))
+
+        safe_depth_divisor = torch.where(is_in_front, depth_val, torch.tensor(1.0, device=self.device))
+        u_norm = torch.where(is_in_front, rotated_xyz_persp_view[..., 1] / safe_depth_divisor, u_norm)
+        v_norm = torch.where(is_in_front, rotated_xyz_persp_view[..., 2] / safe_depth_divisor, v_norm)
+
+        # Check FOV conditions
+        fov_conditions = (u_norm > -self.w_len) & (u_norm < self.w_len) & \
+                         (v_norm > -self.h_len) & (v_norm < self.h_len)
+        
+        mask = is_in_front & fov_conditions # H, W boolean tensor
+
+        # Map normalized screen coordinates to pixel coordinates in the perspective image
+        # For grid_sample, these need to be in [-1, 1] range.
+        # u_norm maps to x in perspective image, v_norm maps to y
+        # Perspective image: x from -w_len to w_len, y from -h_len to h_len (center is 0,0)
+        # grid_sample x: -1 (left) to 1 (right)
+        # grid_sample y: -1 (top) to 1 (bottom)
+        
+        grid_x_persp = u_norm / self.w_len  # Maps to [-1, 1]
+        #grid_y_persp = v_norm / self.h_len  # Maps to [-1, 1]
+        grid_y_persp = - (v_norm / self.h_len)  # Invert Y-axis for grid_sample convention
+
+        # Where mask is False, set grid coordinates to something outside [-1,1] to be handled by padding_mode
+        grid_x_persp = torch.where(mask, grid_x_persp, torch.tensor(2.0, device=self.device)) # Value > 1
+        grid_y_persp = torch.where(mask, grid_y_persp, torch.tensor(2.0, device=self.device)) # Value > 1
+
+        grid = torch.stack((grid_x_persp, grid_y_persp), dim=2).unsqueeze(0) # 1, H_out, W_out, 2
+
+        # Sample from the perspective image
+        # self._img_tensor_cxhxw_rgb_float is (C, H_persp, W_persp)
+        equirect_component_float = F.grid_sample(self._img_tensor_cxhxw_rgb_float.unsqueeze(0), grid,
+                                                 mode='bilinear', padding_mode='zeros', align_corners=True)
+        
+        equirect_component_uint8 = (torch.clamp(equirect_component_float.squeeze(0) * 255.0, 0, 255)).byte()
+        
+        # Mask should be (H_out, W_out, 1) or (1, H_out, W_out) for broadcasting
+        mask_out = mask.unsqueeze(0) # 1, H, W
+
+        return equirect_component_uint8, mask_out

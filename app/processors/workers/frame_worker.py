@@ -10,7 +10,6 @@ from torchvision.transforms import v2
 import torchvision
 from torchvision import transforms
 
-import cupy as cp # For VR180 memory management
 import numpy as np
 
 from app.processors.utils import faceutil
@@ -205,7 +204,10 @@ class FrameWorker(threading.Thread):
 
         if control.get('VR180ModeEnableToggle', False):
             # === VR180 Path ===
-            equirect_converter = EquirectangularConverter(img_numpy_rgb_uint8) # Takes RGB uint8
+            # img_numpy_rgb_uint8 is HxWxC RGB uint8
+            equirect_converter = EquirectangularConverter(
+                img_numpy_rgb_uint8, device=self.models_processor.device
+            )
 
             # Detect faces on the full equirectangular image to guide perspective cropping
             # run_detect expects CxHxW tensor
@@ -241,19 +243,13 @@ class FrameWorker(threading.Thread):
                 
                 theta, phi = equirect_converter.calculate_theta_phi_from_bbox(bbox_eq_np_single)
                 
-                # Get perspective crop (returns BGR NumPy)
-                perspective_crop_np_bgr_uint8 = equirect_converter.get_perspective_crop(
-                    FOV=90, THETA=theta, PHI=phi, height=1280, width=1280 # Example size
+                # Get perspective crop (returns Torch tensor CHW RGB uint8 on GPU)
+                perspective_crop_torch_rgb_uint8 = equirect_converter.get_perspective_crop(
+                    FOV=90, THETA=theta, PHI=phi, height=1024, width=1024 # Example size
                 )
-                if perspective_crop_np_bgr_uint8 is None or perspective_crop_np_bgr_uint8.size == 0: continue
-
-                perspective_crop_np_rgb_uint8 = perspective_crop_np_bgr_uint8[..., ::-1].copy() # BGR to RGB
-                if not perspective_crop_np_rgb_uint8.flags['C_CONTIGUOUS']:
-                    perspective_crop_np_rgb_uint8 = np.ascontiguousarray(perspective_crop_np_rgb_uint8)
-
-                perspective_crop_torch_rgb_uint8 = torch.from_numpy(
-                    perspective_crop_np_rgb_uint8
-                ).permute(2,0,1).to(self.models_processor.device)
+                if perspective_crop_torch_rgb_uint8 is None or perspective_crop_torch_rgb_uint8.numel() == 0:
+                    print(f"VR180: Skipping empty perspective crop for eye {eye_side}")
+                    continue
                 
                 # Only process (swap/edit) the crop if swapfacesButton or editFacesButton is checked
                 if self.main_window.swapfacesButton.isChecked() or self.main_window.editFacesButton.isChecked():
@@ -276,40 +272,37 @@ class FrameWorker(threading.Thread):
                 }
             
             # Stitch processed crops back
-            # Start with a copy of the original equirect image (BGR for PerspectiveConverter)
-            final_equirect_np_bgr_uint8 = equirect_converter.equirect_image_bgr_uint8.copy()
-            p2e_converter = PerspectiveConverter(img_numpy_rgb_uint8) # Takes RGB uint8
+            # Start with the original equirect image as a Torch tensor
+            # equirect_converter.equirect_tensor_cxhxw_rgb_uint8 is already CHW RGB uint8 on device
+            final_equirect_torch_cxhxw_rgb_uint8 = equirect_converter.equirect_tensor_cxhxw_rgb_uint8.clone()
+            
+            p2e_converter = PerspectiveConverter(
+                img_numpy_rgb_uint8, device=self.models_processor.device
+            )
 
             for eye_side, data in processed_perspective_crops_details.items():
-                # Convert processed crop tensor back to BGR NumPy for stitching
-                crop_to_stitch_np_rgb_uint8 = data['tensor_rgb_uint8'].permute(1,2,0).cpu().numpy()
-                crop_to_stitch_np_bgr_uint8 = crop_to_stitch_np_rgb_uint8[..., ::-1].copy() # RGB to BGR
-                if not crop_to_stitch_np_bgr_uint8.flags['C_CONTIGUOUS']:
-                     crop_to_stitch_np_bgr_uint8 = np.ascontiguousarray(crop_to_stitch_np_bgr_uint8)
-                
+                # data['tensor_rgb_uint8'] is already CHW RGB uint8 Torch tensor on GPU
                 p2e_converter.stitch_single_perspective(
-                    target_equirect_bgr=final_equirect_np_bgr_uint8, # Modified in-place
-                    processed_crop_bgr_uint8=crop_to_stitch_np_bgr_uint8,
+                    target_equirect_torch_cxhxw_rgb_uint8=final_equirect_torch_cxhxw_rgb_uint8, # Modified in-place
+                    processed_crop_torch_cxhxw_rgb_uint8=data['tensor_rgb_uint8'],
                     theta=data['theta'], phi=data['phi'], fov=90, # Must match FOV used for cropping
                     is_left_eye=(eye_side == "L")
                 )
             
-            # Convert final stitched BGR NumPy to RGB tensor
-            final_equirect_np_rgb_uint8 = final_equirect_np_bgr_uint8[...,::-1].copy() # BGR to RGB
-            if not final_equirect_np_rgb_uint8.flags['C_CONTIGUOUS']:
-                final_equirect_np_rgb_uint8 = np.ascontiguousarray(final_equirect_np_rgb_uint8)
-            
-            processed_tensor_rgb_uint8 = torch.from_numpy(
-                final_equirect_np_rgb_uint8
-            ).permute(2,0,1).to(self.models_processor.device)
+            processed_tensor_rgb_uint8 = final_equirect_torch_cxhxw_rgb_uint8
+
 
             # GPU Memory Cleanup for VR path
-            if 'equirect_converter' in locals(): del equirect_converter
+            if 'equirect_converter' in locals(): 
+                for key in list(processed_perspective_crops_details.keys()): # Iterate over a copy of keys
+                    if 'tensor_rgb_uint8' in processed_perspective_crops_details[key]:
+                        del processed_perspective_crops_details[key]['tensor_rgb_uint8'] # Delete the tensor
+                    # del processed_perspective_crops_details[key] # Deleting the inner dict entry                
+                del equirect_converter
             if 'p2e_converter' in locals(): del p2e_converter
-            if 'final_equirect_np_bgr_uint8' in locals(): del final_equirect_np_bgr_uint8
+            #if 'final_equirect_torch_cxhxw_rgb_uint8' in locals(): del final_equirect_torch_cxhxw_rgb_uint8
             if 'processed_perspective_crops_details' in locals(): del processed_perspective_crops_details
-            cp.get_default_memory_pool().free_all_blocks()
-            cp.get_default_pinned_memory_pool().free_all_blocks()
+            torch.cuda.empty_cache() # Use sparingly if memory issues persist
             
         else:
             # === Standard Path (adapting frame_worker-orig.py) ===
