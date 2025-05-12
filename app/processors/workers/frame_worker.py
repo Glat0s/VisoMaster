@@ -243,7 +243,7 @@ class FrameWorker(threading.Thread):
                 
                 # Get perspective crop (returns BGR NumPy)
                 perspective_crop_np_bgr_uint8 = equirect_converter.get_perspective_crop(
-                    FOV=90, THETA=theta, PHI=phi, height=1280, width=1280 # Example size
+                    FOV=90, THETA=theta, PHI=phi, height=1024, width=1024 # Example size
                 )
                 if perspective_crop_np_bgr_uint8 is None or perspective_crop_np_bgr_uint8.size == 0: continue
 
