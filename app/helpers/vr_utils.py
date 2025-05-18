@@ -1,16 +1,13 @@
-import os
 import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from torchvision import transforms
 
 
 # Assuming Equirec2Perspec_vr and Perspec2Equirec_vr are in app.processors.external
 from app.processors.external.Equirec2Perspec_vr import Equirectangular as E2P_Equirectangular
 from app.processors.external.Perspec2Equirec_vr import Perspective as P2E_Perspective
-
-TEMP_DIR_VR = ".vr_temp_processing" # Define a temporary directory for VR processing files
 
 
 def _get_sobel_kernels(device):
@@ -25,7 +22,7 @@ class EquirectangularConverter:
         :param equirect_image_data_rgb_uint8: NumPy array (H, W, C) in RGB, uint8 format.
         :param device: PyTorch device to use.
         """
-        os.makedirs(TEMP_DIR_VR, exist_ok=True)
+
         self.device = device
         # Convert NumPy HWC RGB to Torch CHW RGB tensor on GPU
         self.equirect_tensor_cxhxw_rgb_uint8 = torch.from_numpy(
@@ -61,7 +58,6 @@ class PerspectiveConverter:
         :param base_equirect_image_data_rgb_uint8: NumPy array (H, W, C) in RGB, uint8 format.
         :param device: PyTorch device to use.
         """
-        os.makedirs(TEMP_DIR_VR, exist_ok=True)
 
         self.device = device
         # Convert NumPy HWC RGB to Torch CHW RGB tensor on GPU
@@ -76,6 +72,7 @@ class PerspectiveConverter:
         :param mask_torch: Torch tensor (1, H, W) or (H, W), boolean or float, on GPU.
         :return: Feathered mask as Torch tensor (1, H, W), float, on GPU.
         """
+        
         mask_float_torch = mask_torch.float()
         if mask_float_torch.ndim == 2: # HW
             mask_float_torch = mask_float_torch.unsqueeze(0) # 1HW
@@ -110,6 +107,12 @@ class PerspectiveConverter:
         Assumes all tensors are on self.device.
         """
 
+        # The FOV for P2E_Perspective must match the FOV of the processed_crop_torch_cxhxw_rgb_uint8.
+        # This 'fov' parameter passed to stitch_single_perspective is that FOV.
+        if processed_crop_torch_cxhxw_rgb_uint8 is None or processed_crop_torch_cxhxw_rgb_uint8.numel() == 0:
+            print(f"stitch_single_perspective: processed_crop is None or empty. Skipping stitch for theta={theta}, phi={phi}.")
+            return
+
         p2e_instance = P2E_Perspective(processed_crop_torch_cxhxw_rgb_uint8, FOV=fov, THETA=theta, PHI=phi)
         # GetEquirec returns Torch tensors:
         # equirect_component_torch: (C, H, W) RGB uint8, the processed crop warped to equirectangular space.
@@ -139,7 +142,6 @@ class PerspectiveConverter:
         composite_float = target_equirect_float * (1.0 - feathered_mask_torch_float_1hw) + \
                           equirect_component_float * feathered_mask_torch_float_1hw
 
-
         # Use the eye-specific (non-feathered) mask for direct replacement areas
         # eye_specific_mask_torch_original_shape is (1, H, W) boolean
         # Expand to (C, H, W) for torch.where
@@ -155,7 +157,3 @@ class PerspectiveConverter:
         del feathered_mask_torch_float_1hw
         del target_equirect_float, equirect_component_float, composite_float, mask_for_where, final_blended_float
  
-def cleanup_temp_dir():
-    import shutil
-    if os.path.exists(TEMP_DIR_VR):
-        shutil.rmtree(TEMP_DIR_VR)

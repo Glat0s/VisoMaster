@@ -34,8 +34,9 @@ class FrameWorker(threading.Thread):
         self.video_processor = main_window.video_processor
         self.is_single_frame = is_single_frame
         self.parameters = {} # Will be populated from main_window.parameters
-        # self.target_faces = main_window.target_faces # Not directly used here, main_window.target_faces is used
-        # self.compare_images = [] # Not used in this merged version's flow
+        # VR specific constants
+        self.VR_PERSPECTIVE_RENDER_SIZE = 512 # Pixels, for rendering perspective crops
+        self.VR_DYNAMIC_FOV_PADDING_FACTOR = 1.15 # Padding factor for dynamic FOV calculation
         self.is_view_face_compare: bool = False
         self.is_view_face_mask: bool = False
 
@@ -93,41 +94,45 @@ class FrameWorker(threading.Thread):
             print(f"Error in FrameWorker for frame {self.frame_number}: {e}")
             traceback.print_exc()
 
-    def _process_single_vr_perspective_crop(self,
+    def _process_single_vr_perspective_crop_multi(self,
                                  perspective_crop_torch_rgb_uint8: torch.Tensor,
                                  target_face_button: 'widget_components.TargetFaceCardButton',
-                                 parameters_for_face: dict,
+                                 parameters_for_face: ParametersDict,
                                  control_global: dict,
+                                 kps_on_crop_param: np.ndarray, # Keypoints on the perspective_crop
+                                 swap_button_is_checked_global: bool, # Global swap state
+                                 edit_button_is_checked_global: bool, # Global edit state
                                  eye_side_for_debug: str = ""
                                  ) -> torch.Tensor:
         """
-        Processes a single perspective crop for VR180: detects face, swaps, restores, pastes back.
+        Processes a single perspective crop for VR180: uses provided kps, swaps, edits, restores, pastes back.
         """
         # Detect face within the perspective crop
         # Note: input_size should match the crop's dimensions
-        _, crop_kpss_5, _ = self.models_processor.run_detect(
-            perspective_crop_torch_rgb_uint8,
-            control_global['DetectorModelSelection'],
-            max_num=1, # Assuming one primary face per targeted crop
-            score=control_global['DetectorScoreSlider'] / 100.0,
-            #input_size=(perspective_crop_torch_rgb_uint8.shape[2], perspective_crop_torch_rgb_uint8.shape[1]), # W, H
-            input_size=(512, 512), # Use fixed H, W hint, e.g. (H_crop, W_crop) or (512,512)
-            use_landmark_detection=control_global['LandmarkDetectToggle'],
-            landmark_detect_mode=control_global['LandmarkDetectModelSelection'],
-            landmark_score=control_global["LandmarkDetectScoreSlider"]/100.0,
-            from_points=control_global["DetectFromPointsToggle"],
-            rotation_angles=[0] # No auto-rotation for perspective crops
-        )
 
         processed_crop_torch_rgb_uint8 = perspective_crop_torch_rgb_uint8.clone()
 
-        if len(crop_kpss_5) > 0:
-            face_kps_5_on_crop = crop_kpss_5[0] # Keypoints relative to the perspective crop
+        if kps_on_crop_param is None or kps_on_crop_param.size == 0:
+            # This case should ideally be handled before calling,
+            # but as a safeguard, return original if no kps.
+            print(f"VR SWAP DEBUG: kps_on_crop_param was None or empty for {eye_side_for_debug}. Skipping processing for this crop.")
 
-            # Get source embedding (s_e) for swapping
-            arcface_model_for_swap = self.models_processor.get_arcface_model(parameters_for_face['SwapModelSelection'])
-            s_e_for_swap_np = target_face_button.assigned_input_embedding.get(arcface_model_for_swap)
-            
+            return processed_crop_torch_rgb_uint8
+        # If the above 'if' returns, the rest of the code is effectively an 'else' block.
+
+        face_kps_5_on_crop_to_use = kps_on_crop_param # Use the provided keypoints
+
+        # Only proceed with swapping/editing logic if swap or edit is enabled
+        if not (swap_button_is_checked_global or edit_button_is_checked_global):
+            return processed_crop_torch_rgb_uint8 # Return original crop if no swap/edit
+
+        # Get source embedding (s_e) for swapping
+        arcface_model_for_swap = self.models_processor.get_arcface_model(parameters_for_face['SwapModelSelection'])
+        s_e_for_swap_np = None
+        if swap_button_is_checked_global: # Only get s_e if actually swapping
+            s_e_for_swap_np = target_face_button.assigned_input_embedding.get(arcface_model_for_swap) if target_face_button.assigned_input_embedding else None
+
+            # Validate s_e            
             if s_e_for_swap_np is None or \
                not isinstance(s_e_for_swap_np, np.ndarray) or \
                s_e_for_swap_np.size == 0 or \
@@ -135,22 +140,35 @@ class FrameWorker(threading.Thread):
                np.isinf(s_e_for_swap_np).any():
                 s_e_for_swap_np = None # Invalidate if problematic
 
-            t_e_for_swap_np = target_face_button.get_embedding(arcface_model_for_swap) # Target embedding for likeness
 
-            # DFM model instance
+        t_e_for_swap_np = target_face_button.get_embedding(arcface_model_for_swap) # Target embedding for likeness
+
+        # DFM model instance
+        dfm_model_instance_local = None
+        if parameters_for_face['SwapModelSelection'] == 'DeepFaceLive (DFM)':
             dfm_model_name = parameters_for_face['DFMModelSelection']
-            dfm_model_instance_local = None
-            if parameters_for_face['SwapModelSelection'] == 'DeepFaceLive (DFM)' and dfm_model_name:
+            if dfm_model_name:
                 dfm_model_instance_local = self.models_processor.load_dfm_model(dfm_model_name)
 
-            # Proceed with swap_core if s_e is valid or if it's DFM mode with a valid instance
-            if s_e_for_swap_np is not None or (parameters_for_face['SwapModelSelection'] == 'DeepFaceLive (DFM)' and dfm_model_instance_local):
-                # swap_core expects the full image (perspective_crop here) and kps relative to it.
-                # It returns a 512x512 swapped face.
+        # s_e for swap_core should only be passed if swap_button_is_checked_global is true.
+        # If only edit is on, s_e should be None to prevent actual swapping in swap_core,
+        # but still allow mask/original face generation if swap_core is structured that way.
+        s_e_for_swap_core = s_e_for_swap_np if swap_button_is_checked_global else None
+
+        # Call swap_core if:
+        # 1. Swapping is enabled and s_e_for_swap_core is valid (or DFM is configured).
+        # 2. Editing is enabled (swap_core might be needed for mask/original_face even if not swapping).
+        if (swap_button_is_checked_global and (s_e_for_swap_core is not None or \
+            (parameters_for_face['SwapModelSelection'] == 'DeepFaceLive (DFM)' and dfm_model_instance_local is not None))) or \
+            edit_button_is_checked_global:
+
+            # swap_core returns a 512x512 swapped face and its comprehensive mask.
+            # If is_perspective_crop=True, it doesn't paste back itself.
+            try:
                 swapped_face_512_torch_rgb_uint8, comprehensive_mask_1x512x512_from_swap_core, _ = self.swap_core(
                     perspective_crop_torch_rgb_uint8, # The "full image" for this operation
-                    face_kps_5_on_crop,             # Keypoints on this "full image"
-                    s_e=s_e_for_swap_np,
+                    face_kps_5_on_crop_to_use,             # Keypoints on this "full image"
+                    s_e=s_e_for_swap_core, # Pass s_e only if swapping
                     t_e=t_e_for_swap_np,
                     parameters=parameters_for_face,
                     control=control_global,
@@ -158,53 +176,115 @@ class FrameWorker(threading.Thread):
                     is_perspective_crop=True
                 )
                 
-                # Paste the 512x512 swapped face back onto the perspective_crop_torch_rgb_uint8
-                tform_persp_to_512template = self.get_face_similarity_tform(parameters_for_face['SwapModelSelection'], face_kps_5_on_crop)
+            except Exception as e_swap_core:
+                print(f"Error in swap_core for VR crop {eye_side_for_debug}: {e_swap_core}")
+                traceback.print_exc()
+                # Fallback: use original crop and a zero mask to prevent unintended pasting
+                swapped_face_512_torch_rgb_uint8 = t512(perspective_crop_torch_rgb_uint8) # Placeholder
+                comprehensive_mask_1x512x512_from_swap_core = torch.zeros((1, 512, 512), dtype=torch.float32, device=perspective_crop_torch_rgb_uint8.device)
 
-                persp_border_mask_1x128x128 = self.get_border_mask(parameters_for_face)
-                persp_final_combined_mask_1x512x512 = t512(persp_border_mask_1x128x128)
-                persp_final_combined_mask_3x512x512_float = persp_final_combined_mask_1x512x512.repeat(3,1,1).float()
+            tform_persp_to_512template = self.get_face_similarity_tform(parameters_for_face['SwapModelSelection'], face_kps_5_on_crop_to_use)
+            
+            # Refined mask handling for pasting
+            persp_final_combined_mask_1x512x512_float_for_paste = None
+            if comprehensive_mask_1x512x512_from_swap_core is None or comprehensive_mask_1x512x512_from_swap_core.numel() == 0:
+                if swap_button_is_checked_global: # Swap intended, but mask failed
+                    print(f"VR SWAP DEBUG: Mask from swap_core was None/empty for {eye_side_for_debug}. Using default open (border) mask.")
+                    persp_final_combined_mask_1x512x512_float_for_paste = t512(self.get_border_mask(parameters_for_face)).float()
 
-                # Use the comprehensive mask returned by swap_core
-                if comprehensive_mask_1x512x512_from_swap_core is None or comprehensive_mask_1x512x512_from_swap_core.numel() == 0:
-                    # Fallback to a full pass-through mask if something went wrong in swap_core's mask generation
-                    persp_final_combined_mask_1x512x512_float_for_paste = torch.ones((1, 512, 512), dtype=torch.float32, device=perspective_crop_torch_rgb_uint8.device)
                 else:
-                    persp_final_combined_mask_1x512x512_float_for_paste = comprehensive_mask_1x512x512_from_swap_core.float() # Already 1x512x512 float
+                    persp_final_combined_mask_1x512x512_float_for_paste = torch.zeros((1, 512, 512), dtype=torch.float32, device=perspective_crop_torch_rgb_uint8.device)
+            elif swap_button_is_checked_global and torch.all(comprehensive_mask_1x512x512_from_swap_core == 0):
+                print(f"VR SWAP DEBUG: Mask from swap_core was all zero for {eye_side_for_debug} when swap was intended. Using default open (border) mask.")
+                persp_final_combined_mask_1x512x512_float_for_paste = t512(self.get_border_mask(parameters_for_face)).float()
+            else: 
+                persp_final_combined_mask_1x512x512_float_for_paste = comprehensive_mask_1x512x512_from_swap_core.float()
 
-                persp_final_combined_mask_3x512x512_float_for_paste = persp_final_combined_mask_1x512x512_float_for_paste.repeat(3,1,1) # Ensure 3 channels
+            persp_final_combined_mask_3x512x512_float_for_paste = persp_final_combined_mask_1x512x512_float_for_paste.repeat(3,1,1)
 
-                masked_swapped_face_to_paste_float = swapped_face_512_torch_rgb_uint8.float() * persp_final_combined_mask_3x512x512_float_for_paste
+            masked_swapped_face_to_paste_float = swapped_face_512_torch_rgb_uint8.float() * persp_final_combined_mask_3x512x512_float_for_paste
 
-                crop_h, crop_w = perspective_crop_torch_rgb_uint8.shape[1], perspective_crop_torch_rgb_uint8.shape[2]
-                # get_grid_for_pasting needs a transform from target (persp_crop) to source (512_face)
-                _, source_grid_normalized_xy_persp = self.get_grid_for_pasting(
-                    tform_persp_to_512template, crop_h, crop_w, 512, 512, perspective_crop_torch_rgb_uint8.device
+            crop_h, crop_w = perspective_crop_torch_rgb_uint8.shape[1], perspective_crop_torch_rgb_uint8.shape[2]
+            _, source_grid_normalized_xy_persp = self.get_grid_for_pasting(
+                tform_persp_to_512template, crop_h, crop_w, 512, 512, perspective_crop_torch_rgb_uint8.device
+            )
+
+            pasted_face_on_persp_float = torch.nn.functional.grid_sample(
+                masked_swapped_face_to_paste_float.unsqueeze(0),
+                source_grid_normalized_xy_persp,
+                mode='bilinear', padding_mode='border', align_corners=False
+            ).squeeze(0)
+
+            transformed_mask_on_persp_float = torch.nn.functional.grid_sample(
+                persp_final_combined_mask_3x512x512_float_for_paste.unsqueeze(0),
+                source_grid_normalized_xy_persp,
+                mode='bilinear', padding_mode='zeros', align_corners=False
+            ).squeeze(0)
+
+            original_persp_crop_float = perspective_crop_torch_rgb_uint8.float()
+            blended_persp_crop_float = pasted_face_on_persp_float + original_persp_crop_float * (1.0 - transformed_mask_on_persp_float)
+            processed_crop_torch_rgb_uint8 = torch.clamp(blended_persp_crop_float, 0, 255).byte()
+            
+            # --- Face Editor for VR Crop ---
+            if edit_button_is_checked_global:
+                # Re-detect kps_all on the (potentially swapped) crop for the editor
+                _, _, kps_all_for_editor_list = self.models_processor.run_detect(
+                    processed_crop_torch_rgb_uint8, 
+                    control_global['DetectorModelSelection'], max_num=1,
+                    score=control_global['DetectorScoreSlider']/100.0,
+                    input_size=(processed_crop_torch_rgb_uint8.shape[1], processed_crop_torch_rgb_uint8.shape[2]),
+                    use_landmark_detection=True, landmark_detect_mode="203", 
+                    landmark_score=control_global["LandmarkDetectScoreSlider"]/100.0,
+                    from_points=True, 
+                    rotation_angles=[0]
                 )
+                kps_all_for_editor_on_crop = None
+                if kps_all_for_editor_list.shape[0] > 0:
+                    kps_all_for_editor_on_crop = kps_all_for_editor_list[0]
 
-                pasted_face_on_persp_float = torch.nn.functional.grid_sample(
-                    masked_swapped_face_to_paste_float.unsqueeze(0),
-                    source_grid_normalized_xy_persp,
-                    mode='bilinear',
-                    padding_mode='border',
-                    align_corners=False
-                ).squeeze(0)
-
-                transformed_mask_on_persp_float = torch.nn.functional.grid_sample(
-                    persp_final_combined_mask_3x512x512_float_for_paste.unsqueeze(0),
-                    source_grid_normalized_xy_persp,
-                    mode='bilinear', padding_mode='zeros', align_corners=False
-                ).squeeze(0)
-
-                original_persp_crop_float = perspective_crop_torch_rgb_uint8.float()
-                blended_persp_crop_float = pasted_face_on_persp_float + original_persp_crop_float * (1.0 - transformed_mask_on_persp_float)
-                processed_crop_torch_rgb_uint8 = torch.clamp(blended_persp_crop_float, 0, 255).byte()
+                if kps_all_for_editor_on_crop is not None and kps_all_for_editor_on_crop.size > 0:
+                    processed_crop_torch_rgb_uint8 = self.swap_edit_face_core(
+                        processed_crop_torch_rgb_uint8, 
+                        kps_all_for_editor_on_crop,   
+                        parameters_for_face,
+                        control_global
+                    )
+                else:
+                    print(f"VR EDIT DEBUG: Could not get kps_all for editor on crop {eye_side_for_debug}. Skipping edit.")
         
         return processed_crop_torch_rgb_uint8
+
+    def _find_best_target_match(self, detected_embedding_np, control_global):
+        best_target_button = None
+        best_params_pd = None
+        highest_sim = -1.0 # Initialize to a value lower than any possible similarity
+
+        for target_id, target_button_widget in list(self.main_window.target_faces.items()):
+            face_specific_params_dict = self.parameters.get(target_id, {})
+            default_params_dict = dict(self.main_window.default_parameters) if isinstance(self.main_window.default_parameters, ParametersDict) else self.main_window.default_parameters
+            
+            current_params_pd = ParametersDict(dict(face_specific_params_dict), default_params_dict)
+
+            target_embedding_np = target_button_widget.get_embedding(control_global['RecognitionModelSelection'])
+            if target_embedding_np is None: continue
+
+            sim = self.models_processor.findCosineDistance(detected_embedding_np, target_embedding_np)
+            
+            if sim >= current_params_pd['SimilarityThresholdSlider'] and sim > highest_sim:
+                highest_sim = sim
+                best_target_button = target_button_widget
+                best_params_pd = current_params_pd
+                
+        return best_target_button, best_params_pd, highest_sim
+
 
     def process_frame(self, control: dict): # control is passed in
         # Input self.frame is HxWxC RGB uint8 NumPy array
         img_numpy_rgb_uint8 = self.frame
+
+        # Cache UI states at the beginning of frame processing for consistency
+        swap_button_is_checked_global = self.main_window.swapfacesButton.isChecked()
+        edit_button_is_checked_global = self.main_window.editFacesButton.isChecked()
         
         # This tensor will be modified and eventually converted back to NumPy BGR
         processed_tensor_rgb_uint8 = torch.from_numpy(img_numpy_rgb_uint8).to(self.models_processor.device).permute(2,0,1)
@@ -213,6 +293,7 @@ class FrameWorker(threading.Thread):
 
         if control.get('VR180ModeEnableToggle', False):
             # === VR180 Path ===
+            original_equirect_tensor_for_vr = processed_tensor_rgb_uint8.clone() # Keep a pristine copy for VR background
             # img_numpy_rgb_uint8 is HxWxC RGB uint8
             equirect_converter = EquirectangularConverter(
                 img_numpy_rgb_uint8, device=self.models_processor.device
@@ -220,8 +301,8 @@ class FrameWorker(threading.Thread):
 
             # Detect faces on the full equirectangular image to guide perspective cropping
             # run_detect expects CxHxW tensor
-            bboxes_eq_np, _, _ = self.models_processor.run_detect( # kpss_5_eq_np not used directly here
-                processed_tensor_rgb_uint8.clone(), # Use a clone for detection
+            bboxes_eq_np, kpss_5_eq_np, _ = self.models_processor.run_detect(
+                original_equirect_tensor_for_vr, # Detect on the pristine original
                 control['DetectorModelSelection'],
                 max_num=control['MaxFacesToDetectSlider'],
                 score=control['DetectorScoreSlider']/100.0,
@@ -236,59 +317,111 @@ class FrameWorker(threading.Thread):
 
             processed_perspective_crops_details = {}
 
-            for i, bbox_eq_np_single in enumerate(bboxes_eq_np):
-                # Determine eye based on horizontal position of bbox center in equirect image
-                x_center_eq = (bbox_eq_np_single[0] + bbox_eq_np_single[2]) / 2
-                eye_side = "L" if x_center_eq < equirect_converter.width / 2 else "R"
-                
-                # Process only one crop per eye for now to avoid redundant processing if multiple faces are in one eye's view
-                if eye_side in processed_perspective_crops_details: continue
+            analyzed_faces_for_vr = []
 
-                # Use the currently selected target face in the UI for swapping
-                selected_target_face_button = self.main_window.cur_selected_target_face_button
-                if not selected_target_face_button: continue # No target selected, skip
+            for i, bbox_eq_single in enumerate(bboxes_eq_np):
+                kps_5_eq_single = kpss_5_eq_np[i]
                 
-                # Create ParametersDict for the current face in VR mode
-                face_specific_params_vr = self.parameters.get(selected_target_face_button.face_id, {})
-                default_params_dict_vr = dict(self.main_window.default_parameters) if isinstance(self.main_window.default_parameters, ParametersDict) else self.main_window.default_parameters
-                if isinstance(face_specific_params_vr, ParametersDict): # Should be plain dict from self.parameters
-                    face_specific_params_vr = dict(face_specific_params_vr)
-                parameters_for_current_face_pd = ParametersDict(face_specific_params_vr, default_params_dict_vr)
-                
-                theta, phi = equirect_converter.calculate_theta_phi_from_bbox(bbox_eq_np_single)
-                
-                # Get perspective crop (returns Torch tensor CHW RGB uint8 on GPU)
-                perspective_crop_torch_rgb_uint8 = equirect_converter.get_perspective_crop(
-                    FOV=90, THETA=theta, PHI=phi, height=1024, width=1024 # Example size
+                theta, phi = equirect_converter.calculate_theta_phi_from_bbox(bbox_eq_single)
+                original_eye_side = "L" if (bbox_eq_single[0] + bbox_eq_single[2]) / 2 < equirect_converter.width / 2 else "R"
+
+                # Calculate dynamic FOV for the perspective crop
+                angular_width_deg = (bbox_eq_single[2] - bbox_eq_single[0]) / equirect_converter.width * 360.0
+                angular_height_deg = (bbox_eq_single[3] - bbox_eq_single[1]) / equirect_converter.height * 180.0
+                dynamic_fov_for_crop = max(angular_width_deg, angular_height_deg) * self.VR_DYNAMIC_FOV_PADDING_FACTOR
+                # Clip FOV to a reasonable range
+                dynamic_fov_for_crop = np.clip(dynamic_fov_for_crop, 15.0, 100.0) # Min 15 deg, Max 100 deg FOV
+
+                crop_render_height = self.VR_PERSPECTIVE_RENDER_SIZE
+                crop_render_width = self.VR_PERSPECTIVE_RENDER_SIZE
+
+                face_crop_tensor = equirect_converter.get_perspective_crop(
+                    FOV=dynamic_fov_for_crop, THETA=theta, PHI=phi,
+                    height=crop_render_height, width=crop_render_width
                 )
-                if perspective_crop_torch_rgb_uint8 is None or perspective_crop_torch_rgb_uint8.numel() == 0:
-                    print(f"VR180: Skipping empty perspective crop for eye {eye_side}")
-                    continue
-                
-                # Only process (swap/edit) the crop if swapfacesButton or editFacesButton is checked
-                if self.main_window.swapfacesButton.isChecked() or self.main_window.editFacesButton.isChecked():
-                    processed_crop_torch_rgb_uint8 = self._process_single_vr_perspective_crop(
-                        perspective_crop_torch_rgb_uint8,
-                        selected_target_face_button,
-                        parameters_for_current_face_pd,
-                        control,
-                        # eye_side_for_debug=f"_eye{eye_side}" # Pass if _process_single_vr_perspective_crop uses it
-                    )
-                else:
-                    # If no swap/edit, use the original perspective crop
-                    processed_crop_torch_rgb_uint8 = perspective_crop_torch_rgb_uint8
+                if face_crop_tensor is None or face_crop_tensor.numel() == 0: continue
 
+                _, kps_on_crop_list, _ = self.models_processor.run_detect(
+                    face_crop_tensor, control['DetectorModelSelection'], max_num=1,
+                    score=control['DetectorScoreSlider']/100.0,
+                    input_size=(crop_render_height, crop_render_width), # Use actual render dimensions
+                    use_landmark_detection=control['LandmarkDetectToggle'],
+                    landmark_detect_mode=control['LandmarkDetectModelSelection'],
+                    landmark_score=control["LandmarkDetectScoreSlider"]/100.0,
+                    from_points=control["DetectFromPointsToggle"], rotation_angles=[0] # No auto-rotation for perspective crops
+                )
+
+                # Check if kps_on_crop_list indicates no usable keypoints
+                no_valid_kps = False
+                if isinstance(kps_on_crop_list, np.ndarray):
+                    if not kps_on_crop_list.any(): # Original logic for numpy arrays
+                        no_valid_kps = True
+                elif not kps_on_crop_list: # For lists (e.g., empty list)
+                    no_valid_kps = True
+                # If kps_on_crop_list is an unexpected type, it might fall through.
+                # If it's a non-empty list, no_valid_kps remains False.
+
+                if no_valid_kps:
+                    del face_crop_tensor
+                    continue
+                kps_on_crop = kps_on_crop_list[0]
+
+                face_emb_crop, _ = self.models_processor.run_recognize_direct(
+                    face_crop_tensor, kps_on_crop,
+                    control['SimilarityTypeSelection'], control['RecognitionModelSelection']
+                )
                 
-                processed_perspective_crops_details[eye_side] = {
-                    'tensor_rgb_uint8': processed_crop_torch_rgb_uint8, # This is the processed crop
-                    'theta': theta,
-                    'phi': phi
+                best_target_button_vr, best_params_for_target_vr, _ = self._find_best_target_match(
+                    face_emb_crop, control
+                )
+                
+                if best_target_button_vr:
+                    analyzed_faces_for_vr.append({
+                        'theta': theta, 'phi': phi, 
+                        'original_eye_side': original_eye_side,
+                        'face_crop_tensor': face_crop_tensor, 
+                        'kps_on_crop': kps_on_crop,
+                        'target_button': best_target_button_vr,
+                        'params': best_params_for_target_vr,
+                        'fov_used_for_crop': dynamic_fov_for_crop, # Store the dynamic FOV
+                        # 'crop_render_h': crop_render_height, # Not strictly needed for stitching if FOV is used
+                        # 'crop_render_w': crop_render_width
+                    })
+                else: # No matching target face in UI
+                    del face_crop_tensor
+
+
+            swap_button_is_checked_global = self.main_window.swapfacesButton.isChecked() # Cache this
+            edit_button_is_checked_global = self.main_window.editFacesButton.isChecked()
+
+            for item_data in analyzed_faces_for_vr:
+                processed_crop_for_stitching = item_data['face_crop_tensor'] # Default to original crop
+                if swap_button_is_checked_global or edit_button_is_checked_global: # Only process if swap/edit is on
+                    processed_crop_for_stitching = self._process_single_vr_perspective_crop_multi(
+                        item_data['face_crop_tensor'],
+                        item_data['target_button'],
+                        item_data['params'],
+                        control,
+                        kps_on_crop_param=item_data['kps_on_crop'],
+                        swap_button_is_checked_global=swap_button_is_checked_global,
+                        edit_button_is_checked_global=edit_button_is_checked_global,
+                        eye_side_for_debug=f"{item_data['original_eye_side']}"
+                    )
+
+                current_crop_key = f"{item_data['original_eye_side']}_{item_data['theta']}_{item_data['phi']}" # More unique key                
+                processed_perspective_crops_details[current_crop_key] = { # Corrected key
+                    'tensor_rgb_uint8': processed_crop_for_stitching, # Corrected value: use the (potentially) processed crop
+                    'theta': item_data['theta'],
+                    'phi': item_data['phi'],
+                    'fov_used_for_crop': item_data['fov_used_for_crop'] # Pass the dynamic FOV
                 }
+
+                del item_data['face_crop_tensor'] # Moved inside the loop to clean up for current item
             
             # Stitch processed crops back
             # Start with the original equirect image as a Torch tensor
             # equirect_converter.equirect_tensor_cxhxw_rgb_uint8 is already CHW RGB uint8 on device
-            final_equirect_torch_cxhxw_rgb_uint8 = equirect_converter.equirect_tensor_cxhxw_rgb_uint8.clone()
+            final_equirect_torch_cxhxw_rgb_uint8 = original_equirect_tensor_for_vr.clone() # Use the pristine clone
             
             p2e_converter = PerspectiveConverter(
                 img_numpy_rgb_uint8, device=self.models_processor.device
@@ -299,8 +432,8 @@ class FrameWorker(threading.Thread):
                 p2e_converter.stitch_single_perspective(
                     target_equirect_torch_cxhxw_rgb_uint8=final_equirect_torch_cxhxw_rgb_uint8, # Modified in-place
                     processed_crop_torch_cxhxw_rgb_uint8=data['tensor_rgb_uint8'],
-                    theta=data['theta'], phi=data['phi'], fov=90, # Must match FOV used for cropping
-                    is_left_eye=(eye_side == "L")
+                    theta=data['theta'], phi=data['phi'], fov=data['fov_used_for_crop'], # Use stored dynamic FOV
+                    is_left_eye=("L" in eye_side.split('_')[0]) # Correctly use eye_side (key of the loop)
                 )
             
             processed_tensor_rgb_uint8 = final_equirect_torch_cxhxw_rgb_uint8
@@ -314,9 +447,10 @@ class FrameWorker(threading.Thread):
                     # del processed_perspective_crops_details[key] # Deleting the inner dict entry                
                 del equirect_converter
             if 'p2e_converter' in locals(): del p2e_converter
-            #if 'final_equirect_torch_cxhxw_rgb_uint8' in locals(): del final_equirect_torch_cxhxw_rgb_uint8
+            if 'original_equirect_tensor_for_vr' in locals(): del original_equirect_tensor_for_vr
             if 'processed_perspective_crops_details' in locals(): del processed_perspective_crops_details
-            torch.cuda.empty_cache() # Use sparingly if memory issues persist
+            del analyzed_faces_for_vr # Clean up list
+            torch.cuda.empty_cache() # Attempt to free memory
             
         else:
             # === Standard Path (adapting frame_worker-orig.py) ===
@@ -355,7 +489,7 @@ class FrameWorker(threading.Thread):
             use_landmark_detection = control['LandmarkDetectToggle']
             landmark_detect_mode = control['LandmarkDetectModelSelection']
             from_points = control["DetectFromPointsToggle"]
-            if self.main_window.editFacesButton.isChecked(): # Force landmark settings for editor
+            if edit_button_is_checked_global: # Use cached UI state
                 if not use_landmark_detection or landmark_detect_mode == "5":
                     use_landmark_detection = True
                     landmark_detect_mode = "203"
@@ -387,62 +521,43 @@ class FrameWorker(threading.Thread):
             # Main processing loop for standard path
             if det_faces_data_for_display:
                 for fface_data in det_faces_data_for_display:
-                    # Determine which target face to use (e.g., currently selected or first one)
-                    target_to_process_with = None
-                    if self.main_window.cur_selected_target_face_button:
-                        target_to_process_with = self.main_window.cur_selected_target_face_button
-                    elif self.main_window.target_faces:
-                        target_to_process_with = list(self.main_window.target_faces.values())[0]
-                    
-                    if not target_to_process_with: 
-                        continue
-
-                    # Create ParametersDict for the current face
-                    face_specific_params = self.parameters.get(target_to_process_with.face_id, {})
-                    default_params_dict = dict(self.main_window.default_parameters) if isinstance(self.main_window.default_parameters, ParametersDict) else self.main_window.default_parameters
-                    if isinstance(face_specific_params, ParametersDict): # Should be plain dict
-                        face_specific_params = dict(face_specific_params)
-                    parameters_for_face_pd = ParametersDict(face_specific_params, default_params_dict)
-                        
-                    sim = self.models_processor.findCosineDistance(fface_data['embedding'], target_to_process_with.get_embedding(control['RecognitionModelSelection']))                   
-                                   
-                    if sim >= parameters_for_face_pd['SimilarityThresholdSlider']:
-                        if self.main_window.swapfacesButton.isChecked() or self.main_window.editFacesButton.isChecked():
-                            arcface_model_for_swap = self.models_processor.get_arcface_model(parameters_for_face_pd['SwapModelSelection'])
+                    best_target_button_std, best_params_pd_std, _ = self._find_best_target_match(
+                        fface_data['embedding'], control
+                    )
+                                        
+                    if best_target_button_std is not None:
+                        if swap_button_is_checked_global or edit_button_is_checked_global:
+                            arcface_model_for_swap_std = self.models_processor.get_arcface_model(best_params_pd_std['SwapModelSelection'])
                             s_e_np = None
-                            if self.main_window.swapfacesButton.isChecked(): # Only get s_e if actually swapping
-                                s_e_np = target_to_process_with.assigned_input_embedding.get(arcface_model_for_swap)
+                            if swap_button_is_checked_global:
+                                s_e_np = best_target_button_std.assigned_input_embedding.get(arcface_model_for_swap_std) if best_target_button_std.assigned_input_embedding else None
                                 if s_e_np is None or not isinstance(s_e_np, np.ndarray) or s_e_np.size == 0 or np.isnan(s_e_np).any() or np.isinf(s_e_np).any():
                                     s_e_np = None # Invalidate
 
-                            t_e_np = target_to_process_with.get_embedding(arcface_model_for_swap)
+                            t_e_np = best_target_button_std.get_embedding(arcface_model_for_swap_std)
                                 
                             dfm_model_instance_local = None
-                            if parameters_for_face_pd['SwapModelSelection'] == 'DeepFaceLive (DFM)':
-                                dfm_model_name = parameters_for_face_pd('DFMModelSelection')
+                            if best_params_pd_std['SwapModelSelection'] == 'DeepFaceLive (DFM)':
+                                dfm_model_name = best_params_pd_std['DFMModelSelection']
                                 if dfm_model_name:
                                     dfm_model_instance_local = self.models_processor.load_dfm_model(dfm_model_name)
                             
-                            # Proceed if s_e is valid (for latent models) or DFM is set up
-                            if s_e_np is not None or (parameters_for_face_pd['SwapModelSelection'] == 'DeepFaceLive (DFM)' and dfm_model_instance_local is not None):
-                                kps_5_adjusted = self.keypoints_adjustments(fface_data['kps_5'].copy(), parameters_for_face_pd) # Use copy
-                                
-                                # swap_core operates on img_for_detection_and_swap
+                            if s_e_np is not None or (best_params_pd_std['SwapModelSelection'] == 'DeepFaceLive (DFM)' and dfm_model_instance_local is not None):
+                                kps_5_adjusted = self.keypoints_adjustments(fface_data['kps_5'].copy(), best_params_pd_std)
                                 img_for_detection_and_swap, original_face_comp, swap_mask_comp = self.swap_core(
                                     img_for_detection_and_swap,
                                     kps_5_adjusted,
                                     s_e=s_e_np, t_e=t_e_np,
-                                    parameters=parameters_for_face_pd, control=control,
+                                    parameters=best_params_pd_std, control=control,
                                     dfm_model_instance=dfm_model_instance_local,
                                     is_perspective_crop=False # Standard path
                                 )
                                 fface_data['original_face'] = original_face_comp
                                 fface_data['swap_mask'] = swap_mask_comp
                             
-                        if self.main_window.editFacesButton.isChecked():
-                            # swap_edit_face_core also operates on img_for_detection_and_swap
+                        if edit_button_is_checked_global:
                             img_for_detection_and_swap = self.swap_edit_face_core(
-                                img_for_detection_and_swap, fface_data['kps_all'], parameters_for_face_pd, control
+                                img_for_detection_and_swap, fface_data['kps_all'], best_params_pd_std, control
                             )
             
             # Inverse Rotation (applied after all processing on img_for_detection_and_swap)
@@ -529,29 +644,22 @@ class FrameWorker(threading.Thread):
             # For simplicity, we'll use default color if no match or specific settings found.
             
             keypoints_to_draw = fface_data.get('kps_all') # Default to all keypoints
-            landmark_color_rgb = (0, 255, 255) # Default color (Cyan for 'all')
+            landmark_color_rgb = (0, 255, 255) # Default color (Cyan for 'all') # RGB
 
             # Check if this detected face matches any target face to use specific settings
-            matched_params = None
-            for _, target_face_widget in self.main_window.target_faces.items():
-                params_candidate = self.parameters.get(target_face_widget.face_id)
-                if params_candidate:
-                    sim = self.models_processor.findCosineDistance(
-                        fface_data['embedding'],
-                        target_face_widget.get_embedding(control['RecognitionModelSelection'])
-                    )
-                    if sim >= params_candidate['SimilarityThresholdSlider']: 
-                        matched_params = params_candidate
-                        break
-            
-            if matched_params and matched_params['LandmarksPositionAdjEnableToggle']:
+           
+            # Find the best matching target for this detected face
+            _, matched_params_for_paint, _ = self._find_best_target_match(fface_data['embedding'], control)
+
+            if matched_params_for_paint and matched_params_for_paint['LandmarksPositionAdjEnableToggle']:
                 keypoints_to_draw = fface_data.get('kps_5')
-                landmark_color_rgb = (255, 0, 0) # Red for adjusted 5 points
+                landmark_color_rgb = (255, 0, 0) # Red for adjusted 5 points (RGB)
+            elif keypoints_to_draw is None and fface_data.get('kps_5') is not None: # Fallback if kps_all is missing
+                 keypoints_to_draw = fface_data.get('kps_5') # Still use default color
             
             if keypoints_to_draw is not None:
                 for kpoint in keypoints_to_draw:
-                    kx, ky = int(kpoint[0]), int(kpoint[1])
-                    # Draw a small square for each keypoint
+                    kx, ky = int(kpoint[0]), int(kpoint[1]) # kpoint is [x,y]
                     for i_offset in range(-point_thickness // 2, point_thickness // 2 + 1):
                         for j_offset in range(-point_thickness // 2, point_thickness // 2 + 1):
                             final_y, final_x = ky + i_offset, kx + j_offset
@@ -559,8 +667,8 @@ class FrameWorker(threading.Thread):
                             if 0 <= final_y < img_hwc_rgb_uint8_out.shape[0] and \
                                0 <= final_x < img_hwc_rgb_uint8_out.shape[1]:
                                 img_hwc_rgb_uint8_out[final_y, final_x, 0] = landmark_color_rgb[0]
-                                img_hwc_rgb_uint8_out[final_y, final_x, 1] = landmark_color_rgb[1]
-                                img_hwc_rgb_uint8_out[final_y, final_x, 2] = landmark_color_rgb[2]
+                                img_hwc_rgb_uint8_out[final_y, final_x, 1] = landmark_color_rgb[1] # G
+                                img_hwc_rgb_uint8_out[final_y, final_x, 2] = landmark_color_rgb[2] # B
         return img_hwc_rgb_uint8_out
 
     def draw_bounding_boxes_on_detected_faces(self, img_cxhxw_rgb_uint8: torch.Tensor, det_faces_data: list, control: dict) -> torch.Tensor:
@@ -606,40 +714,17 @@ class FrameWorker(threading.Thread):
         imgs_to_vstack = []
         
         for fface_data in det_faces_data:
-            # Check if this face matches a target face that has parameters for comparison
-            target_face_match_found = False
-            parameters_for_face = self.main_window.default_parameters # Fallback
-            
-            # Prefer currently selected target face if it matches
-            if self.main_window.cur_selected_target_face_button:
-                target_face = self.main_window.cur_selected_target_face_button
-                params_candidate = self.parameters.get(target_face.face_id, self.main_window.default_parameters)
-                sim = self.models_processor.findCosineDistance(
-                    fface_data['embedding'],
-                    target_face.get_embedding(control['RecognitionModelSelection'])
-                )
-                if sim >= params_candidate.get('SimilarityThresholdSlider', 0.5):
-                    target_face_match_found = True
-                    parameters_for_face = params_candidate
-            
-            # If no match with current selection, check all target faces (less ideal for compare view)
-            if not target_face_match_found:
-                for _, target_face_widget in self.main_window.target_faces.items():
-                    face_specific_params_comp = self.parameters.get(target_face_widget.face_id, {})
-                    default_params_dict_comp = dict(self.main_window.default_parameters) if isinstance(self.main_window.default_parameters, ParametersDict) else self.main_window.default_parameters
-                    params_candidate = ParametersDict(face_specific_params_comp, default_params_dict_comp)
-                    sim = self.models_processor.findCosineDistance(
-                        fface_data['embedding'],
-                        target_face_widget.get_embedding(control['RecognitionModelSelection'])
-                    )
-                    if sim >= params_candidate['SimilarityThresholdSlider']:
-                        target_face_match_found = True
-                        parameters_for_face = params_candidate
-                        break # Take first match if multiple
 
-            if target_face_match_found:
-                # Get a 512x512 crop of the face from the main image using its keypoints
-                # This is the "modified face" before enhancement for comparison purposes
+            # Find the best matching target face for this detected face
+            best_target_for_compare, parameters_for_face, _ = self._find_best_target_match(
+                fface_data['embedding'], control
+            )
+
+            if best_target_for_compare and parameters_for_face:
+                # parameters_for_face is already a ParametersDict from _find_best_target_match
+                # If not, it would need to be constructed:
+                # parameters_for_face = ParametersDict(self.parameters.get(best_target_for_compare.face_id, {}), dict(self.main_window.default_parameters))
+
                 modified_face_512 = self.get_cropped_face_using_kps(img_cxhxw_rgb_uint8, fface_data['kps_5'], parameters_for_face)
                 
 
@@ -664,7 +749,7 @@ class FrameWorker(threading.Thread):
                     mask_chw = swap_mask_from_swap_core.permute(2,0,1) # CHW
                     if mask_chw.shape[0] == 1: mask_chw = mask_chw.repeat(3,1,1)
                     imgs_to_cat_horizontally.append(mask_chw)
-  
+
                 if imgs_to_cat_horizontally:
                     # Ensure all tensors have same height for horizontal concatenation
                     min_h = min(t.shape[1] for t in imgs_to_cat_horizontally)
@@ -672,7 +757,7 @@ class FrameWorker(threading.Thread):
                     for t_img in imgs_to_cat_horizontally:
                         if t_img.shape[1] != min_h:
                             aspect_ratio = t_img.shape[2] / t_img.shape[1]
-                            new_w = int(min_h * aspect_ratio)
+                            new_w = int(min_h * aspect_ratio) if aspect_ratio > 0 else t_img.shape[2] # Avoid div by zero if min_h is 0
                             resized_imgs_to_cat.append(v2.Resize((min_h, new_w), antialias=True)(t_img))
                         else:
                             resized_imgs_to_cat.append(t_img)

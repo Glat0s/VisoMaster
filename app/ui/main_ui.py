@@ -27,8 +27,6 @@ from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
 from app.ui.widgets.face_editor_layout_data import FACE_EDITOR_LAYOUT_DATA
 from app.helpers.miscellaneous import DFM_MODELS_DATA, ParametersDict
 from app.helpers.typing_helper import FacesParametersTypes, ParametersTypes, ControlTypes, MarkerTypes
-from app.helpers.vr_utils import cleanup_temp_dir
-
 
 ParametersWidgetTypes = Dict[str, widget_components.ToggleButton|widget_components.SelectionBox|widget_components.ParameterDecimalSlider|widget_components.ParameterSlider|widget_components.ParameterText]
 
@@ -272,7 +270,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         save_load_actions.save_current_workspace(self, 'last_workspace.json')
         # Optionally handle the event if needed
-        cleanup_temp_dir()
         event.accept()
 
     def load_last_workspace(self):
