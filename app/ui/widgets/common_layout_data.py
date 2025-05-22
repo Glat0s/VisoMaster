@@ -77,7 +77,7 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
         'FaceRestorerType2Selection': {
             'level': 2,
             'label': 'Restorer Type',
-            'options': ['GFPGAN-v1.4', 'CodeFormer', 'GPEN-256', 'GPEN-512', 'GPEN-1024', 'GPEN-2048', 'RestoreFormer++', 'VQFR-v2'],
+            'options': ['GFPGAN-v1.4', 'GFPGAN-1024', 'CodeFormer', 'GPEN-256', 'GPEN-512', 'GPEN-1024', 'GPEN-2048', 'RestoreFormer++', 'VQFR-v2'],
             'default': 'GFPGAN-v1.4',
             'parentToggle': 'FaceRestorerEnable2Toggle',
             'requiredToggleValue': True,
