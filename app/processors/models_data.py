@@ -260,6 +260,13 @@ models_list = [
 
     },
     {
+        "model_name": "GFPGAN1024",
+        "local_path": f"{models_dir}/gfpgan-1024.onnx",
+        "hash": "ee8dd6415e388b3a410689d5d9395a2bf50b5973b588421ebfa57bc266f19e24",
+        "url": "https://github.com/Glat0s/GFPGAN-1024-onnx/releases/download/v0.0.1/gfpgan-1024.onnx"
+
+    },
+    {
         "model_name": "GPENBFR256",
         "local_path": f"{models_dir}/GPEN-BFR-256.onnx",
         "hash": "aa5bd3ab238640a378c59e4a560f7a7150627944cf2129e6311ae4720e833271",
