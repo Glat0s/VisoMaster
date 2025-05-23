@@ -464,9 +464,9 @@ class VideoProcessor(QObject):
             # "-level:v", "6.2",
             # Set color properties (NVENC should respect these)
             "-color_range", "tv",
-            "-colorspace", "bt709",
-            "-color_primaries", "bt709",
-            "-color_trc", "bt709",
+            "-colorspace", "bt2020nc",
+            "-color_primaries", "bt2020",
+            "-color_trc", "smpte2084",
             "-tag:v", "hvc1",
 
             # Audio Codec: Copy directly
