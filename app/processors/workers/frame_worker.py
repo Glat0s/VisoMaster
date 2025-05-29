@@ -603,32 +603,33 @@ class FrameWorker(threading.Thread):
         
         return final_img_np_rgb_uint8[..., ::-1] # RGB to BGR
 
-    def _apply_denoiser_pass(self, image_tensor_cxhxw_uint8: torch.Tensor, control: dict, denoiser_base_seed: int = 0) -> torch.Tensor:
+    def _apply_denoiser_pass(self, image_tensor_cxhxw_uint8: torch.Tensor, control: dict) -> torch.Tensor:
         """Helper to apply UNet denoiser based on control settings."""
         unet_model_selected = control.get('DenoiserUNetModelSelection')
         denoised_image = image_tensor_cxhxw_uint8 # Default to input if not applied
+        denoiser_seed_from_slider_val = int(control.get('DenoiserBaseSeedSlider', 0)) # Get seed from control
 
         if unet_model_selected and unet_model_selected != "No UNet models found" and \
            os.path.exists(os.path.join(models_dir, unet_model_selected)):
-            # print(f"Frame {self.frame_number}, Base Seed {denoiser_base_seed}: Applying UNet Denoiser ({unet_model_selected})")
+            # print(f"Frame {self.frame_number}, UI Seed {denoiser_seed_from_slider}: Applying UNet Denoiser ({unet_model_selected})")
             denoised_image = self.models_processor.apply_denoiser_unet(
                 image_tensor_cxhxw_uint8,
                 unet_model_selected,
                 denoiser_mode=control.get('DenoiserModeSelection', "Single Step (Fast)"),
-                frame_number_for_seed=denoiser_base_seed, # Use fixed base seed
+                frame_number_for_seed=denoiser_seed_from_slider_val, # Use seed from UI slider
                 denoiser_single_step_t=control.get('DenoiserSingleStepTimestepSlider', 10),
                 denoiser_ddim_steps=control.get('DenoiserDDIMStepsSlider', 50),
                 denoiser_ddim_eta=control.get('DenoiserDDIMEtaDecimalSlider', 0.0)
             )
         else:
             # Fallback logic for default unet model (copied from existing code)
-            default_unet_fallback = "ref_ldm_unet_n1.onnx" 
+            default_unet_fallback = "ref_ldm_unet_n1.onnx"
             if os.path.exists(os.path.join(models_dir, default_unet_fallback)):
-                # print(f"Frame {self.frame_number}, Base Seed {denoiser_base_seed}: UNet Denoiser - Selected model '{unet_model_selected}' invalid/not found. Using default fallback: {default_unet_fallback}.")
+                # print(f"Frame {self.frame_number}, UI Seed {denoiser_seed_from_slider}: UNet Denoiser - Selected model '{unet_model_selected}' invalid/not found. Using default fallback: {default_unet_fallback}.")
                 denoised_image = self.models_processor.apply_denoiser_unet(
                     image_tensor_cxhxw_uint8, default_unet_fallback,
                     denoiser_mode=control.get('DenoiserModeSelection', "Single Step (Fast)"),
-                    frame_number_for_seed=denoiser_base_seed, # Use fixed base seed
+                    frame_number_for_seed=denoiser_seed_from_slider_val, # Use seed from UI slider
                     denoiser_single_step_t=control.get('DenoiserSingleStepTimestepSlider', 10),
                     denoiser_ddim_steps=control.get('DenoiserDDIMStepsSlider', 50),
                     denoiser_ddim_eta=control.get('DenoiserDDIMEtaDecimalSlider', 0.0)
@@ -1268,8 +1269,8 @@ class FrameWorker(threading.Thread):
 
         # --- Apply UNet Denoiser to the swapped face (before restorers) ---
         # --- First Denoiser Pass (before restorers) ---
-        if control.get('DenoiserUNetEnableToggle', False): # type: ignore
-            swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(swapped_final_512_cxhxw_uint8, control, denoiser_base_seed=0) # Use the same base seed as pass 1
+        if control.get('DenoiserUNetEnableToggle', False):
+            swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(swapped_final_512_cxhxw_uint8, control)
 
         if parameters['FaceExpressionEnableToggle']:
             swapped_final_512_cxhxw_uint8 = self.apply_face_expression_restorer(original_face_512_cxhxw_uint8, swapped_final_512_cxhxw_uint8, parameters)
@@ -1282,7 +1283,7 @@ class FrameWorker(threading.Thread):
 
         # --- Second Denoiser Pass (after restorers) ---
         if control.get('DenoiserUNetEnableToggle', False) and control.get('DenoiserAfterRestorersToggle', False):
-            swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(swapped_final_512_cxhxw_uint8, control, denoiser_base_seed=0) # Use the same base seed as pass 1
+            swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(swapped_final_512_cxhxw_uint8, control)
 
         if parameters["OccluderEnableToggle"]:
             mask = self.models_processor.apply_occlusion(original_face_256_for_masks, parameters["OccluderSizeSlider"])

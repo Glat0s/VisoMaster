@@ -271,6 +271,16 @@ SETTINGS_LAYOUT_DATA: LayoutDictTypes = {
             'requiredSelectionValue': "DDIM Loop (Quality)",
             'help': 'DDIM eta (0.0 for deterministic DDIM, >0 for DDPM-like stochasticity).'
         },
+        'DenoiserBaseSeedSlider': {
+            'level': 2, # Same level as DenoiserModeSelection
+            'widget_type': 'ParameterSlider',
+            'label': 'Base Seed',
+            'control_name': 'DenoiserBaseSeedSlider',
+            'min_value': '0', 'max_value': '999999', 'default': '0', 'step': 1,
+            'parentToggle': 'DenoiserUNetEnableToggle', # Depends on the main denoiser toggle
+            'requiredToggleValue': True,
+            'help': 'Set a fixed base seed for the denoiser. This seed will be used for all frames and both denoiser passes (if applicable) to ensure consistent noise patterns.'
+        },
         'DenoiserAfterRestorersToggle': {
             'level': 2, # Same level as DenoiserModeSelection
             'widget_type': 'ToggleButton',
