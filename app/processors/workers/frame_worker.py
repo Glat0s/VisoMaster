@@ -16,6 +16,7 @@ from app.processors.utils import faceutil
 import app.ui.widgets.actions.common_actions as common_widget_actions # Used in original
 from app.ui.widgets.actions import video_control_actions # Used in original
 from app.helpers.miscellaneous import t512,t384,t256,t128, ParametersDict
+from app.processors.models_data import models_dir # For UNet model existence check
 from app.helpers.vr_utils import EquirectangularConverter, PerspectiveConverter # For VR180
 
 if TYPE_CHECKING:
@@ -288,7 +289,7 @@ class FrameWorker(threading.Thread):
         
         # This tensor will be modified and eventually converted back to NumPy BGR
         processed_tensor_rgb_uint8 = torch.from_numpy(img_numpy_rgb_uint8).to(self.models_processor.device).permute(2,0,1)
-        
+
         det_faces_data_for_display = [] # For overlays in standard mode
 
         if control.get('VR180ModeEnableToggle', False):
@@ -1231,6 +1232,34 @@ class FrameWorker(threading.Thread):
         border_mask_1x128x128 = self.get_border_mask(parameters)
         current_composite_mask_1x128x128 = torch.ones((1, 128, 128), dtype=torch.float32, device=self.models_processor.device)
 
+        # --- Apply UNet Denoiser to the swapped face (before restorers) ---
+        if control.get('DenoiserUNetEnableToggle', False):
+            unet_model_selected = control.get('DenoiserUNetModelSelection')
+            if unet_model_selected and unet_model_selected != "No UNet models found" and os.path.exists(os.path.join(models_dir, unet_model_selected)):
+                # print(f"Frame {self.frame_number}, Face: Applying UNet Denoiser ({unet_model_selected}) to swapped face.")
+                swapped_final_512_cxhxw_uint8 = self.models_processor.apply_denoiser_unet(
+                    swapped_final_512_cxhxw_uint8, 
+                    unet_model_selected,
+                    denoiser_mode=control.get('DenoiserModeSelection', "Single Step (Fast)"),
+                    frame_number_for_seed=self.frame_number, # Pass frame number
+                    denoiser_single_step_t=control.get('DenoiserSingleStepTimestepSlider', 10),
+                    denoiser_ddim_steps=control.get('DenoiserDDIMStepsSlider', 50),
+                    denoiser_ddim_eta=control.get('DenoiserDDIMEtaDecimalSlider', 0.0)
+                )
+            else:
+                default_unet_fallback = "ref_ldm_unet_n1.onnx"
+                if os.path.exists(os.path.join(models_dir, default_unet_fallback)):
+                    # print(f"Frame {self.frame_number}, Face: UNet Denoiser - Selected model '{unet_model_selected}' invalid/not found. Using default fallback: {default_unet_fallback}.")
+                    swapped_final_512_cxhxw_uint8 = self.models_processor.apply_denoiser_unet(
+                        swapped_final_512_cxhxw_uint8, default_unet_fallback,
+                        denoiser_mode=control.get('DenoiserModeSelection', "Single Step (Fast)"),
+                        frame_number_for_seed=self.frame_number, # Pass frame number
+                        denoiser_single_step_t=control.get('DenoiserSingleStepTimestepSlider', 10),
+                        denoiser_ddim_steps=control.get('DenoiserDDIMStepsSlider', 50),
+                        denoiser_ddim_eta=control.get('DenoiserDDIMEtaDecimalSlider', 0.0)
+                    )
+                else:
+                    print(f"Frame {self.frame_number}, Face: UNet Denoiser enabled but no valid model selected or default fallback '{default_unet_fallback}' found.")
         if parameters['FaceExpressionEnableToggle']:
             swapped_final_512_cxhxw_uint8 = self.apply_face_expression_restorer(original_face_512_cxhxw_uint8, swapped_final_512_cxhxw_uint8, parameters)
 
@@ -1603,22 +1632,32 @@ class FrameWorker(threading.Thread):
     def apply_face_expression_restorer(self, driving_cxhxw_uint8: torch.Tensor, target_cxhxw_uint8: torch.Tensor, parameters: dict) -> torch.Tensor:
         # driving_cxhxw_uint8, target_cxhxw_uint8 are Cx512x512 uint8 RGB
         t256_resize = v2.Resize((256, 256), interpolation=v2.InterpolationMode.BILINEAR, antialias=False)
+        MIN_LANDMARKS_FOR_EXPRESSION_RESTORER = 68 # LivePortrait models typically expect dense landmarks
 
         # Process driving face
         # Assuming driving_cxhxw_uint8 is already aligned 512x512 face
-        _, driving_lmk_crop_list, _ = self.models_processor.run_detect_landmark(
+        _, driving_lmk_array, _ = self.models_processor.run_detect_landmark(
             driving_cxhxw_uint8, bbox=np.array([0, 0, 512, 512]), det_kpss=[],
             detect_mode='203', score=0.5, from_points=False
         )
-        if not driving_lmk_crop_list: return target_cxhxw_uint8 # Cannot proceed
-        driving_lmk_crop = driving_lmk_crop_list[0]
+
+        # Check if landmarks were found and are valid
+        if driving_lmk_array is None or not isinstance(driving_lmk_array, np.ndarray) or \
+           driving_lmk_array.ndim != 2 or driving_lmk_array.shape[0] < MIN_LANDMARKS_FOR_EXPRESSION_RESTORER:
+            num_points_driving = 0
+            if isinstance(driving_lmk_array, np.ndarray) and driving_lmk_array.ndim == 2:
+                num_points_driving = driving_lmk_array.shape[0]
+            print("Warning: Face Expression Restorer: No driving face landmarks found. Skipping.")
+            return target_cxhxw_uint8 # Cannot proceed, return original target
+        driving_lmk_crop = driving_lmk_array
+
 
         driving_face_256 = t256_resize(driving_cxhxw_uint8)
         c_d_eyes_lst = faceutil.calc_eye_close_ratio(driving_lmk_crop[None])
         c_d_lip_lst = faceutil.calc_lip_close_ratio(driving_lmk_crop[None])
         x_d_i_info = self.models_processor.lp_motion_extractor(driving_face_256, 'Human-Face') # Assuming 'Human-Face' is default
-        R_d_i = faceutil.get_rotation_matrix(x_d_i_info['pitch'], x_d_i_info['yaw'], x_d_i_info['roll'])
-                
+        R_d_i = faceutil.get_rotation_matrix(x_d_i_info['pitch'], x_d_i_info['yaw'], x_d_i_info['roll']) # type: ignore
+
         # Get parameters from UI (direct access)
         driving_multiplier = parameters['FaceExpressionFriendlyFactorDecimalSlider']
         animation_region_str = parameters['FaceExpressionAnimationRegionSelection']
@@ -1636,12 +1675,19 @@ class FrameWorker(threading.Thread):
         
         # Process target face (which is the swapped face)
         # Assuming target_cxhxw_uint8 is also an aligned 512x512 face
-        _, source_lmk_list, _ = self.models_processor.run_detect_landmark(
+        _, source_lmk_array, _ = self.models_processor.run_detect_landmark(
             target_cxhxw_uint8, bbox=np.array([0, 0, 512, 512]), det_kpss=[],
             detect_mode='203', score=0.5, from_points=False
         )
-        if not source_lmk_list: return target_cxhxw_uint8 # Cannot proceed
-        source_lmk = source_lmk_list[0]
+
+        if source_lmk_array is None or not isinstance(source_lmk_array, np.ndarray) or \
+           source_lmk_array.ndim != 2 or source_lmk_array.shape[0] < MIN_LANDMARKS_FOR_EXPRESSION_RESTORER:
+            num_points_source = 0
+            if isinstance(source_lmk_array, np.ndarray) and source_lmk_array.ndim == 2:
+                num_points_source = source_lmk_array.shape[0]
+            print(f"Warning: Face Expression Restorer: No target face landmarks found or insufficient points ({num_points_source}). Skipping.")
+            return target_cxhxw_uint8 # Cannot proceed, return original target
+        source_lmk = source_lmk_array
 
         # Warp target face based on its own landmarks for consistent processing space
         target_face_512_warped, M_o2c, M_c2o = faceutil.warp_face_by_face_landmark_x(

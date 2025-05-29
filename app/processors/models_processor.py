@@ -29,7 +29,8 @@ from app.processors.face_swappers import FaceSwappers
 from app.processors.frame_enhancers import FrameEnhancers
 from app.processors.face_editors import FaceEditors
 from app.processors.utils.dfm_model import DFMModel
-from app.processors.models_data import models_list, arcface_mapping_model_dict, models_trt_list
+from app.processors.models_data import models_list, arcface_mapping_model_dict, models_trt_list, models_dir
+from app.processors.utils import faceutil # Assuming faceutil contains create_faded_inner_mask
 from app.helpers.miscellaneous import is_file_exists
 from app.helpers.downloader import download_file
 
@@ -96,6 +97,15 @@ class ModelsProcessor(QtCore.QObject):
         self.face_swappers = FaceSwappers(self)
         self.frame_enhancers = FrameEnhancers(self)
         self.face_editors = FaceEditors(self)
+
+        # Denoiser specific initializations
+        self.lp_mask_crop_latent = faceutil.create_faded_inner_mask(size=(64, 64), border_thickness=3, fade_thickness=8, blur_radius=3, device=self.device)
+        self.lp_mask_crop_latent = torch.unsqueeze(self.lp_mask_crop_latent, 0) # Shape: [1, 64, 64]
+        self.betas_np = np.linspace(0.00085**0.5, 0.0120**0.5, 1000, dtype=np.float64)**2 # Common linear schedule for 1000 steps
+        self.alphas_np = 1.0 - self.betas_np
+        self.alphas_cumprod_np = np.cumprod(self.alphas_np, axis=0)
+        self.alphas_cumprod_torch = torch.from_numpy(self.alphas_cumprod_np).float().to(self.device)
+        self.vae_scale_factor = 0.18215 # Typical LDM VAE scale factor
 
         self.clip_session = []
         self.arcface_dst = np.array( [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655], [70.7299, 92.2041]], dtype=np.float32)
@@ -407,3 +417,341 @@ class ModelsProcessor(QtCore.QObject):
 
     def apply_fake_diff(self, swapped_face, original_face, DiffAmount):
         return self.face_masks.apply_fake_diff(swapped_face, original_face, DiffAmount)
+
+    def run_vae_encoder(self, image_input_tensor: torch.Tensor, output_latent_tensor: torch.Tensor):
+        """
+        Runs the VAE encoder model.
+        image_input_tensor: Batch x 3 x Height x Width, float32, normalized to [-1, 1]
+        output_latent_tensor: Placeholder for Batch x 8 x LatentH x LatentW, float32
+        """
+        model_name = 'RefLDMVAEEncoder'
+        if not self.models[model_name]:
+            # Temporarily force CUDA EP for this model if TensorRT is causing issues
+            if self.provider_name.startswith("TensorRT"):
+                print(f"DEBUG: Forcing CUDAExecutionProvider for {model_name} due to TensorRT issues.")
+                temp_providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+                try:
+                    self.models[model_name] = onnxruntime.InferenceSession(
+                        self.models_path[model_name], providers=temp_providers
+                    )
+                except Exception as e:
+                    print(f"Error loading {model_name} with CUDA EP, falling back to default load: {e}")
+                    self.models[model_name] = self.load_model(model_name) # Fallback to default load
+            else:
+                self.models[model_name] = self.load_model(model_name) # Fallback to default load
+
+            io_binding = self.models[model_name].io_binding()
+            io_binding.bind_input(name='image_input', device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(image_input_tensor.shape), buffer_ptr=image_input_tensor.data_ptr())
+            print(f"DEBUG: run_vae_encoder - output_latent_tensor shape for binding: {output_latent_tensor.shape}") # ADD THIS
+            io_binding.bind_output(name='latent_pre_quant_unscaled', device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(output_latent_tensor.shape), buffer_ptr=output_latent_tensor.data_ptr())
+
+            if self.device == "cuda":
+                torch.cuda.synchronize()
+            elif self.device != "cpu":
+                self.syncvec.cpu()
+            self.models[model_name].run_with_iobinding(io_binding)
+
+    def run_ref_ldm_unet(self, unet_filename: str,
+                         x_noisy_plus_lq_latent: torch.Tensor,
+                         timesteps_tensor: torch.Tensor,
+                         context_tensor: torch.Tensor, # Added
+                         class_labels_tensor: torch.Tensor, # Added
+                         is_ref_flag_tensor: torch.Tensor, # Added
+                         output_unet_tensor: torch.Tensor):
+        """
+        Runs the UNet denoiser model.
+        unet_filename: The filename of the UNet ONNX model (e.g., "ref_ldm_unet_n1.onnx").
+        x_noisy_plus_lq_latent: Batch x 16 x LatentH x LatentW, float32
+        timesteps_tensor: Batch, int64
+        context_tensor: Dummy context, e.g., Batch x 1 x 1, float32
+        class_labels_tensor: Dummy class labels, e.g., Batch, int64
+        is_ref_flag_tensor: Scalar boolean tensor, False for denoising.
+        output_unet_tensor: Placeholder for Batch x 8 x LatentH x LatentW, float32
+        """
+        
+        model_name = unet_filename # Use the filename as the key for the self.models dictionary
+
+        if not self.models.get(model_name) or self.models[model_name] is None: # Check for None as well
+            model_path_to_load = os.path.join(models_dir, unet_filename)
+            if not os.path.exists(model_path_to_load):
+                print(f"Error: UNet Denoiser model file not found: {model_path_to_load}")
+                # Optionally, raise an error or handle it by returning/not processing
+                return
+            print(f"Loading UNet Denoiser: {model_path_to_load}")
+            self.main_window.model_loading_signal.emit()
+            try:
+                self.models[model_name] = onnxruntime.InferenceSession(model_path_to_load, providers=self.providers)
+            except Exception as e:
+                print(f"Error loading ONNX model {model_path_to_load}: {e}")
+                self.main_window.model_loaded_signal.emit() # Ensure dialog is hidden
+                return # Cannot proceed
+            self.main_window.model_loaded_signal.emit()
+
+        ort_session = self.models[model_name]
+        model_inputs = ort_session.get_inputs()
+        model_outputs = ort_session.get_outputs()
+
+        io_binding = ort_session.io_binding()
+
+        # Bind inputs dynamically using names from the loaded model
+        # Assumes the order of tensors passed to this function matches the ONNX model's input order
+        # if the model has fewer inputs than expected, it will only bind the ones that exist.
+
+        io_binding.bind_input(name=model_inputs[0].name, device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(x_noisy_plus_lq_latent.shape), buffer_ptr=x_noisy_plus_lq_latent.data_ptr())
+        io_binding.bind_input(name=model_inputs[1].name, device_type=self.device, device_id=0, element_type=np.int64, shape=tuple(timesteps_tensor.shape), buffer_ptr=timesteps_tensor.data_ptr())
+
+        if len(model_inputs) > 2: # Corresponds to context_tensor
+            io_binding.bind_input(name=model_inputs[2].name, device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(context_tensor.shape), buffer_ptr=context_tensor.data_ptr())
+        if len(model_inputs) > 3: # Corresponds to class_labels_tensor
+            io_binding.bind_input(name=model_inputs[3].name, device_type=self.device, device_id=0, element_type=np.int64, shape=tuple(class_labels_tensor.shape), buffer_ptr=class_labels_tensor.data_ptr())
+        if len(model_inputs) > 4: # Corresponds to is_ref_flag_tensor
+            io_binding.bind_input(name=model_inputs[4].name, device_type=self.device, device_id=0, element_type=np.bool_, shape=tuple(is_ref_flag_tensor.shape), buffer_ptr=is_ref_flag_tensor.data_ptr())
+
+        io_binding.bind_output(name=model_outputs[0].name, device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(output_unet_tensor.shape), buffer_ptr=output_unet_tensor.data_ptr())
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+        elif self.device != "cpu":
+            self.syncvec.cpu()
+        self.models[model_name].run_with_iobinding(io_binding)
+
+    def run_vae_decoder(self, scaled_latent_input_tensor: torch.Tensor, output_image_tensor: torch.Tensor):
+        """
+        Runs the VAE decoder model.
+        scaled_latent_input_tensor: Batch x 8 x LatentH x LatentW, float32
+        output_image_tensor: Placeholder for Batch x 3 x H x W, float32, normalized to [-1, 1]
+        """
+        model_name = 'RefLDMVAEDecoder'
+        if not self.models[model_name]:
+            self.models[model_name] = self.load_model(model_name)
+
+        io_binding = self.models[model_name].io_binding()
+        io_binding.bind_input(name='scaled_latent_input', device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(scaled_latent_input_tensor.shape), buffer_ptr=scaled_latent_input_tensor.data_ptr())
+        io_binding.bind_output(name='image_output', device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(output_image_tensor.shape), buffer_ptr=output_image_tensor.data_ptr())
+
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+        elif self.device != "cpu":
+            self.syncvec.cpu()
+        self.models[model_name].run_with_iobinding(io_binding)
+
+    def apply_denoiser_unet(self, 
+                            image_cxhxw_uint8: torch.Tensor, 
+                            unet_filename: str,
+                            denoiser_mode: str = "Single Step (Fast)", # New parameter
+                            denoiser_single_step_t: int = 10,       # New parameter # Default t for single step
+                            frame_number_for_seed: int = 0,         # New parameter for seeding
+                            denoiser_ddim_steps: int = 50,          # New parameter
+                            denoiser_ddim_eta: float = 0.0           # New parameter
+                            ) -> torch.Tensor:
+        # Input: CxHxW, uint8, RGB, range [0, 255]
+        # Output: CxHxW, uint8, RGB, range [0, 255]
+        # unet_filename: The specific UNet model file to use.
+        
+        # The UNet expects a 64x64 latent. Assuming VAE f=8, input image should be 512x512.
+        target_proc_dim = 512 # Denoiser components are trained for 512x512 inputs
+        _, h_input, w_input = image_cxhxw_uint8.shape
+
+        # Attempt to force deterministic algorithms for the scope of denoiser operations
+        old_deterministic_state = torch.are_deterministic_algorithms_enabled()
+        #torch.use_deterministic_algorithms(True)
+        
+        if h_input != target_proc_dim or w_input != target_proc_dim:
+            print(f"DEBUG: Denoiser - Resizing input face from {h_input}x{w_input} to {target_proc_dim}x{target_proc_dim}")
+            resize_transform = v2.Resize((target_proc_dim, target_proc_dim), interpolation=v2.InterpolationMode.BILINEAR, antialias=True)
+            image_to_process_cxhxw_uint8 = resize_transform(image_cxhxw_uint8)
+        else:
+            image_to_process_cxhxw_uint8 = image_cxhxw_uint8
+
+        # Set seed for deterministic VAE encoding for this frame
+        # This is crucial if the VAE itself has any stochastic behavior or unseeded random initializations
+        torch.manual_seed(frame_number_for_seed)
+        # torch.use_deterministic_algorithms(True) # Potentially uncomment if issues persist, might impact performance
+
+        h_proc, w_proc = image_to_process_cxhxw_uint8.shape[1], image_to_process_cxhxw_uint8.shape[2]
+
+        # 1. Normalize image to [-1, 1] and add batch dimension
+        image_normalized_bchw = (image_to_process_cxhxw_uint8.float() / 127.5) - 1.0
+        #image_normalized_bchw = image_normalized_bchw.unsqueeze(0)
+        # print(f"DEBUG: Denoiser - image_normalized_bchw min: {image_normalized_bchw.min():.4f}, max: {image_normalized_bchw.max():.4f}, mean: {image_normalized_bchw.mean():.4f}")
+        image_normalized_bchw = image_normalized_bchw.unsqueeze(0).contiguous()
+
+
+        # 2. VAE Encode
+        # Latent dimensions should be 64x64 for the UNet
+        latent_h = h_proc // 8 # Should be 64 if h_proc is 512
+        latent_w = w_proc // 8 # Should be 64 if w_proc is 512
+
+        # encoded_latent_8_channel is z_lq (unscaled)
+        # VAE Encoder outputs 8 channels for latent_pre_quant_unscaled
+        encoded_latent_8_channel = torch.empty((1, 8, latent_h, latent_w), dtype=torch.float32, device=self.device).contiguous()
+
+        # --- VAE Encoder Call ---
+        vae_enc_model_name = 'RefLDMVAEEncoder'
+        if not self.models.get(vae_enc_model_name) or self.models[vae_enc_model_name] is None:
+            self.models[vae_enc_model_name] = self.load_model(vae_enc_model_name)
+        
+        vae_enc_session = self.models[vae_enc_model_name]
+        vae_enc_input_name = vae_enc_session.get_inputs()[0].name
+        vae_enc_output_name = vae_enc_session.get_outputs()[0].name
+        
+        vae_enc_io_binding = vae_enc_session.io_binding()
+        vae_enc_io_binding.bind_input(name=vae_enc_input_name, device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(image_normalized_bchw.shape), buffer_ptr=image_normalized_bchw.data_ptr())
+        vae_enc_io_binding.bind_output(name=vae_enc_output_name, device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(encoded_latent_8_channel.shape), buffer_ptr=encoded_latent_8_channel.data_ptr())
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+        elif self.device != "cpu":
+            self.syncvec.cpu()
+        vae_enc_session.run_with_iobinding(vae_enc_io_binding)
+        # --- End VAE Encoder Call ---
+        # print(f"DEBUG: Denoiser - encoded_latent_8_channel (VAE Enc output, UNscaled) min: {encoded_latent_8_channel.min():.4f}, max: {encoded_latent_8_channel.max():.4f}, mean: {encoded_latent_8_channel.mean():.4f}")
+
+        # Prepare UNet inputs
+        lq_latent_scaled_for_unet = encoded_latent_8_channel * self.vae_scale_factor
+        # print(f"DEBUG: Denoiser - lq_latent_scaled_for_unet (z_lq_scaled for UNet 'lq' part) min: {lq_latent_scaled_for_unet.min():.4f}, max: {lq_latent_scaled_for_unet.max():.4f}, mean: {lq_latent_scaled_for_unet.mean():.4f}")
+
+        dummy_context = torch.zeros((1, 1, 1), dtype=torch.float32, device=self.device).contiguous() # Minimal context
+        dummy_class_labels = torch.zeros((1,), dtype=torch.int64, device=self.device).contiguous()   # Minimal class labels
+        is_ref_flag = torch.tensor(False, dtype=torch.bool, device=self.device).contiguous()        # Denoising, not reference
+
+        pred_x0_unscaled = torch.empty_like(encoded_latent_8_channel)
+
+        if denoiser_mode == "Single Step (Fast)":
+            # print(f"DEBUG: Denoiser - Mode: Single Step, Timestep t={denoiser_single_step_t}")
+            x0_unscaled_for_noise_addition = encoded_latent_8_channel 
+            timesteps_tensor = torch.tensor([denoiser_single_step_t], dtype=torch.int64, device=self.device)
+
+            alpha_t_val = self.alphas_cumprod_np[denoiser_single_step_t]
+            sqrt_alpha_bar_t = torch.sqrt(torch.tensor(alpha_t_val, device=self.device, dtype=torch.float32))
+            sqrt_one_minus_alpha_bar_t = torch.sqrt(1.0 - torch.tensor(alpha_t_val, device=self.device, dtype=torch.float32))
+
+            # Seed for deterministic noise generation for this frame and timestep
+            torch.manual_seed(frame_number_for_seed + denoiser_single_step_t)
+            noise_sample = torch.randn_like(x0_unscaled_for_noise_addition)
+            xt_noisy_unscaled_8_channel = x0_unscaled_for_noise_addition * sqrt_alpha_bar_t + noise_sample * sqrt_one_minus_alpha_bar_t
+            # print(f"DEBUG: Denoiser - xt_noisy_unscaled_8_channel (UNSCALED x_t for UNet 'noisy' part) min: {xt_noisy_unscaled_8_channel.min():.4f}, max: {xt_noisy_unscaled_8_channel.max():.4f}, mean: {xt_noisy_unscaled_8_channel.mean():.4f}")
+
+            unet_input_16_channel = torch.cat((xt_noisy_unscaled_8_channel, lq_latent_scaled_for_unet), dim=1)
+            predicted_noise_from_unet = torch.empty((1, 8, latent_h, latent_w), dtype=torch.float32, device=self.device).contiguous()
+            self.run_ref_ldm_unet(unet_filename, unet_input_16_channel, timesteps_tensor, dummy_context, dummy_class_labels, is_ref_flag, predicted_noise_from_unet)
+            # print(f"DEBUG: Denoiser - predicted_noise_from_unet (UNet output, assumed EPS) min: {predicted_noise_from_unet.min():.4f}, max: {predicted_noise_from_unet.max():.4f}, mean: {predicted_noise_from_unet.mean():.4f}")
+            
+            pred_x0_unscaled = (xt_noisy_unscaled_8_channel - sqrt_one_minus_alpha_bar_t * predicted_noise_from_unet) / sqrt_alpha_bar_t
+
+        elif denoiser_mode == "DDIM Loop (Quality)":
+            # print(f"DEBUG: Denoiser - Mode: DDIM Loop, Steps: {denoiser_ddim_steps}, Eta: {denoiser_ddim_eta}, Frame: {frame_number_for_seed}")
+            # Seed for deterministic initial noise generation for this frame
+            torch.manual_seed(frame_number_for_seed)
+            # Initial noisy latent (x_T) - unscaled
+            current_latent_unscaled = torch.randn_like(encoded_latent_8_channel)
+            # print(f"  Initial current_latent_unscaled min: {current_latent_unscaled.min():.4f}, max: {current_latent_unscaled.max():.4f}, mean: {current_latent_unscaled.mean():.4f}")
+            # Timesteps for DDIM
+            ddim_timesteps_np = np.linspace(0, self.alphas_cumprod_np.shape[0] - 1, denoiser_ddim_steps, dtype=int)[::-1].copy()
+
+            for i, t_current_val in enumerate(ddim_timesteps_np):
+                t_prev_val = ddim_timesteps_np[i + 1] if i < denoiser_ddim_steps - 1 else -1
+                # print(f"  DDIM Step {i+1}/{denoiser_ddim_steps}: t_current={t_current_val}, t_prev={t_prev_val}")
+                timesteps_tensor = torch.tensor([t_current_val], dtype=torch.int64, device=self.device)
+                unet_input_16_channel = torch.cat((current_latent_unscaled, lq_latent_scaled_for_unet), dim=1)
+                
+                predicted_noise_from_unet_loop = torch.empty_like(current_latent_unscaled)
+                self.run_ref_ldm_unet(unet_filename, unet_input_16_channel, timesteps_tensor, dummy_context, dummy_class_labels, is_ref_flag, predicted_noise_from_unet_loop)
+
+                alpha_t = self.alphas_cumprod_torch[t_current_val]
+                alpha_t_prev = self.alphas_cumprod_torch[t_prev_val] if t_prev_val >= 0 else torch.tensor(1.0, device=self.device)
+
+                sqrt_alpha_t = torch.sqrt(alpha_t)
+                sqrt_one_minus_alpha_t = torch.sqrt(1.0 - alpha_t)
+                
+                # Predicted x0
+                pred_x0_step = (current_latent_unscaled - sqrt_one_minus_alpha_t * predicted_noise_from_unet_loop) / sqrt_alpha_t
+                
+                # Sigma for DDIM
+                sigma_t = 0.0
+                if denoiser_ddim_eta > 0:
+                    variance = (1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev)
+                    sigma_t = denoiser_ddim_eta * torch.sqrt(variance.clamp(min=1e-20))
+
+                # Direction pointing to x_t
+                dir_xt = torch.sqrt((1.0 - alpha_t_prev - sigma_t**2).clamp(min=0.0)) * predicted_noise_from_unet_loop
+                
+                # Noise for stochasticity
+                if denoiser_ddim_eta > 0 and sigma_t > 1e-6: # Add noise only if eta and sigma are non-zero
+                    # Seed per step for reproducible stochasticity for this frame & step
+                    torch.manual_seed(frame_number_for_seed + t_current_val + i)
+                    noise_t = torch.randn_like(current_latent_unscaled) * sigma_t
+                else:
+                    noise_t = torch.zeros_like(current_latent_unscaled) # Ensure no noise for deterministic DDIM
+                current_latent_unscaled = torch.sqrt(alpha_t_prev) * pred_x0_step + dir_xt + noise_t
+            
+            pred_x0_unscaled = pred_x0_step # The final x0 prediction
+
+        else: # Fallback or error
+            print(f"Warning: Unknown denoiser mode '{denoiser_mode}'. Using original face.")
+            pred_x0_unscaled = encoded_latent_8_channel # Fallback to original unscaled latent
+
+        # Latent masking removed as it might be causing white backgrounds.
+
+        # print(f"DEBUG: Denoiser - pred_x0_unscaled (calculated, to VAE Dec) min: {pred_x0_unscaled.min():.4f}, max: {pred_x0_unscaled.max():.4f}, mean: {pred_x0_unscaled.mean():.4f}")
+        # torch.use_deterministic_algorithms(False) # Reset if it was set earlier
+        # Reset deterministic algorithms to previous state
+        torch.use_deterministic_algorithms(old_deterministic_state)
+
+        # 4. VAE Decode - VAE decoder expects UNSCALED latent based on example code
+        latent_for_vae_decoder = pred_x0_unscaled
+        decoded_image_normalized_bchw = torch.empty((1, 3, h_proc, w_proc), dtype=torch.float32, device=self.device).contiguous()
+
+        # --- VAE Decoder Call ---
+        vae_dec_model_name = 'RefLDMVAEDecoder'
+        if not self.models.get(vae_dec_model_name) or self.models[vae_dec_model_name] is None:
+            self.models[vae_dec_model_name] = self.load_model(vae_dec_model_name)
+
+        vae_dec_session = self.models[vae_dec_model_name]
+        vae_dec_input_name = vae_dec_session.get_inputs()[0].name
+        vae_dec_output_name = vae_dec_session.get_outputs()[0].name
+
+        vae_dec_io_binding = vae_dec_session.io_binding()
+        vae_dec_io_binding.bind_input(name=vae_dec_input_name, device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(latent_for_vae_decoder.shape), buffer_ptr=latent_for_vae_decoder.data_ptr())
+        vae_dec_io_binding.bind_output(name=vae_dec_output_name, device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(decoded_image_normalized_bchw.shape), buffer_ptr=decoded_image_normalized_bchw.data_ptr())
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+        elif self.device != "cpu":
+            self.syncvec.cpu()
+        vae_dec_session.run_with_iobinding(vae_dec_io_binding)
+        # --- End VAE Decoder Call ---
+
+        # print(f"DEBUG: Denoiser - decoded_image_normalized_bchw (VAE Dec output) min: {decoded_image_normalized_bchw.min():.4f}, max: {decoded_image_normalized_bchw.max():.4f}, mean: {decoded_image_normalized_bchw.mean():.4f}")
+
+        # 5. Denormalize image from [-1, 1] to [0, 255] uint8
+        denoised_image_cxhxw_uint8 = ((decoded_image_normalized_bchw.squeeze(0) + 1.0) * 127.5).clamp(0, 255).byte()
+        
+        # Apply RGB mask to the denoised output to clean up background before returning
+        # self.lp_mask_crop is initialized as [1, 512, 512] in ModelsProcessor from faceutil.create_faded_inner_mask
+        # It needs to be expanded to 3 channels if it's single channel.
+        # This mask should be 1 in the center (face region) and fade to 0 at the borders.
+
+        # Use a clone of lp_mask_crop to avoid modifying the shared instance if it's used elsewhere directly
+        # and to ensure it's on the correct device.
+        current_device = denoised_image_cxhxw_uint8.device
+        # Ensure self.lp_mask_crop is on the correct device before cloning and repeating
+        rgb_mask_for_blend = self.lp_mask_crop.to(current_device).clone() 
+
+        if rgb_mask_for_blend.shape[0] == 1: # If it's [1, H, W]
+            rgb_mask_for_blend = rgb_mask_for_blend.repeat(3, 1, 1) # Repeat to [3, H, W]
+
+        # Aggressively ensure the mask's borders are zero to prevent edge artifacts.
+        # This makes the outer edge of the mask hard zero.
+        border_px_for_mask_zeroing = 10  # Number of pixels from edge of the mask to force to zero
+        if rgb_mask_for_blend.ndim == 3: # CxHxW
+            rgb_mask_for_blend[:, :border_px_for_mask_zeroing, :] = 0  # Top
+            rgb_mask_for_blend[:, -border_px_for_mask_zeroing:, :] = 0 # Bottom
+            rgb_mask_for_blend[:, :, :border_px_for_mask_zeroing] = 0  # Left
+            rgb_mask_for_blend[:, :, -border_px_for_mask_zeroing:] = 0 # Right
+
+        if denoised_image_cxhxw_uint8.shape == rgb_mask_for_blend.shape:
+            denoised_float = denoised_image_cxhxw_uint8.float()
+            black_background = torch.zeros_like(denoised_float) # Ensure background is black
+            masked_denoised_float = denoised_float * rgb_mask_for_blend + black_background * (1.0 - rgb_mask_for_blend)
+            denoised_image_cxhxw_uint8 = masked_denoised_float.clamp(0, 255).byte()
+        else:
+            print(f"Warning: RGB output mask shape {rgb_mask_for_blend.shape} does not match denoised image shape {denoised_image_cxhxw_uint8.shape}. Skipping RGB output mask.")
+        return denoised_image_cxhxw_uint8

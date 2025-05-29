@@ -474,5 +474,17 @@ models_list = [
         "hash": "a6164debbf1e851c3dcefa622111c42a78afd9bb8f1540e7d01172ddf642c3b5",
         "url": f"{assets_repo}/v0.1.0_lp/warping_spade-fix.onnx"
 
+    },
+    {
+        "model_name": "RefLDMVAEEncoder",
+        "local_path": f"{models_dir}/ref_ldm_vae_encoder.onnx",
+        "hash": "YOUR_VAE_ENCODER_HASH_HERE", # Replace with actual hash
+        "url": f"{assets_repo}/v_YOUR_VERSION/ref_ldm_vae_encoder.onnx" # Replace with actual URL
+    },
+    {
+        "model_name": "RefLDMVAEDecoder",
+        "local_path": f"{models_dir}/ref_ldm_vae_decoder.onnx",
+        "hash": "YOUR_VAE_DECODER_HASH_HERE", # Replace with actual hash
+        "url": f"{assets_repo}/v_YOUR_VERSION/ref_ldm_vae_decoder.onnx" # Replace with actual URL
     }
 ]

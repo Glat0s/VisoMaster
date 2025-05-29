@@ -210,6 +210,68 @@ SETTINGS_LAYOUT_DATA: LayoutDictTypes = {
             'help': 'Blends the enhanced results back into the original frame.'
         },
     },
+    'UNet Denoiser': {
+        'DenoiserUNetEnableToggle': {
+            'level': 1,
+            'widget_type': 'ToggleButton',
+            'label': 'Enable UNet Denoiser',
+            'control_name': 'DenoiserUNetEnableToggle',
+            'default': False,
+            'help': 'Enable UNet-based image denoising. This is applied to the 512x512 aligned/swapped face before other restorers.'
+        },
+        'DenoiserUNetModelSelection': {
+            'level': 1,
+            'widget_type': 'SelectionBox',
+            'label': 'UNet Denoiser Model',
+            'control_name': 'DenoiserUNetModelSelection',
+            'options': [],
+            'default': "",
+            'condition_control': 'DenoiserUNetEnableToggle',
+            'condition_value': True,
+            'help': 'Select the UNet denoiser ONNX model file. Models should be placed in the model_assets folder and start with "ref_ldm_unet_".'
+        },
+        'DenoiserModeSelection': {
+            'level': 2,
+            'widget_type': 'SelectionBox',
+            'label': 'Denoiser Mode',
+            'control_name': 'DenoiserModeSelection',
+            'options': ["Single Step (Fast)", "DDIM Loop (Quality)"],
+            'default': "Single Step (Fast)",
+            'parentToggle': 'DenoiserUNetEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Choose denoising mode. Single Step is faster, DDIM Loop may offer better quality at the cost of speed.'
+        },
+        'DenoiserSingleStepTimestepSlider': {
+            'level': 3,
+            'widget_type': 'ParameterSlider',
+            'label': 'Single Step Timestep (t)',
+            'control_name': 'DenoiserSingleStepTimestepSlider',
+            'min_value': '1', 'max_value': '200', 'default': '10', 'step': 1,
+            'parentSelection': 'DenoiserModeSelection',
+            'requiredSelectionValue': "Single Step (Fast)",
+            'help': 'Timestep for single-step denoising. Lower values mean less noise added/removed (subtler effect).'
+        },
+        'DenoiserDDIMStepsSlider': {
+            'level': 3,
+            'widget_type': 'ParameterSlider',
+            'label': 'DDIM Steps',
+            'control_name': 'DenoiserDDIMStepsSlider',
+            'min_value': '10', 'max_value': '200', 'default': '50', 'step': 1,
+            'parentSelection': 'DenoiserModeSelection',
+            'requiredSelectionValue': "DDIM Loop (Quality)",
+            'help': 'Number of inference steps for DDIM sampler.'
+        },
+        'DenoiserDDIMEtaDecimalSlider': {
+            'level': 3,
+            'widget_type': 'ParameterDecimalSlider',
+            'label': 'DDIM Eta',
+            'control_name': 'DenoiserDDIMEtaDecimalSlider',
+            'min_value': '0.0', 'max_value': '1.0', 'default': '0.0', 'step': 0.1, 'decimals': 1,
+            'parentSelection': 'DenoiserModeSelection',
+            'requiredSelectionValue': "DDIM Loop (Quality)",
+            'help': 'DDIM eta (0.0 for deterministic DDIM, >0 for DDPM-like stochasticity).'
+        }
+    },
     'Webcam Settings': {
         'WebcamMaxNoSelection': {
             'level': 2,
