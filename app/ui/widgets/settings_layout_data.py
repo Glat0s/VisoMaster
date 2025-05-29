@@ -270,6 +270,16 @@ SETTINGS_LAYOUT_DATA: LayoutDictTypes = {
             'parentSelection': 'DenoiserModeSelection',
             'requiredSelectionValue': "DDIM Loop (Quality)",
             'help': 'DDIM eta (0.0 for deterministic DDIM, >0 for DDPM-like stochasticity).'
+        },
+        'DenoiserAfterRestorersToggle': {
+            'level': 2, # Same level as DenoiserModeSelection
+            'widget_type': 'ToggleButton',
+            'label': 'Apply After Restorers',
+            'control_name': 'DenoiserAfterRestorersToggle',
+            'default': False,
+            'parentToggle': 'DenoiserUNetEnableToggle', # Depends on the main denoiser toggle
+            'requiredToggleValue': True,
+            'help': 'Apply the UNet Denoiser again after face restorers have been applied. Uses the same UNet model and step settings.'
         }
     },
     'Webcam Settings': {

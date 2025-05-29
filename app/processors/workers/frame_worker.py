@@ -603,6 +603,40 @@ class FrameWorker(threading.Thread):
         
         return final_img_np_rgb_uint8[..., ::-1] # RGB to BGR
 
+    def _apply_denoiser_pass(self, image_tensor_cxhxw_uint8: torch.Tensor, control: dict, frame_seed_offset: int = 0) -> torch.Tensor:
+        """Helper to apply UNet denoiser based on control settings."""
+        unet_model_selected = control.get('DenoiserUNetModelSelection')
+        denoised_image = image_tensor_cxhxw_uint8 # Default to input if not applied
+
+        if unet_model_selected and unet_model_selected != "No UNet models found" and \
+           os.path.exists(os.path.join(models_dir, unet_model_selected)):
+            # print(f"Frame {self.frame_number}, Seed Offset {frame_seed_offset}: Applying UNet Denoiser ({unet_model_selected})")
+            denoised_image = self.models_processor.apply_denoiser_unet(
+                image_tensor_cxhxw_uint8,
+                unet_model_selected,
+                denoiser_mode=control.get('DenoiserModeSelection', "Single Step (Fast)"),
+                frame_number_for_seed=self.frame_number + frame_seed_offset,
+                denoiser_single_step_t=control.get('DenoiserSingleStepTimestepSlider', 10),
+                denoiser_ddim_steps=control.get('DenoiserDDIMStepsSlider', 50),
+                denoiser_ddim_eta=control.get('DenoiserDDIMEtaDecimalSlider', 0.0)
+            )
+        else:
+            # Fallback logic for default unet model (copied from existing code)
+            default_unet_fallback = "ref_ldm_unet_n1.onnx" # Example, adjust if different
+            if os.path.exists(os.path.join(models_dir, default_unet_fallback)):
+                # print(f"Frame {self.frame_number}, Seed Offset {frame_seed_offset}: UNet Denoiser - Selected model '{unet_model_selected}' invalid/not found. Using default fallback: {default_unet_fallback}.")
+                denoised_image = self.models_processor.apply_denoiser_unet(
+                    image_tensor_cxhxw_uint8, default_unet_fallback,
+                    denoiser_mode=control.get('DenoiserModeSelection', "Single Step (Fast)"),
+                    frame_number_for_seed=self.frame_number + frame_seed_offset,
+                    denoiser_single_step_t=control.get('DenoiserSingleStepTimestepSlider', 10),
+                    denoiser_ddim_steps=control.get('DenoiserDDIMStepsSlider', 50),
+                    denoiser_ddim_eta=control.get('DenoiserDDIMEtaDecimalSlider', 0.0)
+                )
+            else:
+                print(f"Frame {self.frame_number}: UNet Denoiser enabled but no valid model selected or default fallback '{default_unet_fallback}' found.")
+        return denoised_image
+
     def keypoints_adjustments(self, kps_5: np.ndarray, parameters: dict) -> np.ndarray:
         # This method modifies kps_5 in place if it's not a copy.
         # Ensure a copy is passed if original kps_5 needs to be preserved.
@@ -1233,33 +1267,10 @@ class FrameWorker(threading.Thread):
         current_composite_mask_1x128x128 = torch.ones((1, 128, 128), dtype=torch.float32, device=self.models_processor.device)
 
         # --- Apply UNet Denoiser to the swapped face (before restorers) ---
+        # --- First Denoiser Pass (before restorers) ---
         if control.get('DenoiserUNetEnableToggle', False):
-            unet_model_selected = control.get('DenoiserUNetModelSelection')
-            if unet_model_selected and unet_model_selected != "No UNet models found" and os.path.exists(os.path.join(models_dir, unet_model_selected)):
-                # print(f"Frame {self.frame_number}, Face: Applying UNet Denoiser ({unet_model_selected}) to swapped face.")
-                swapped_final_512_cxhxw_uint8 = self.models_processor.apply_denoiser_unet(
-                    swapped_final_512_cxhxw_uint8, 
-                    unet_model_selected,
-                    denoiser_mode=control.get('DenoiserModeSelection', "Single Step (Fast)"),
-                    frame_number_for_seed=self.frame_number, # Pass frame number
-                    denoiser_single_step_t=control.get('DenoiserSingleStepTimestepSlider', 10),
-                    denoiser_ddim_steps=control.get('DenoiserDDIMStepsSlider', 50),
-                    denoiser_ddim_eta=control.get('DenoiserDDIMEtaDecimalSlider', 0.0)
-                )
-            else:
-                default_unet_fallback = "ref_ldm_unet_n1.onnx"
-                if os.path.exists(os.path.join(models_dir, default_unet_fallback)):
-                    # print(f"Frame {self.frame_number}, Face: UNet Denoiser - Selected model '{unet_model_selected}' invalid/not found. Using default fallback: {default_unet_fallback}.")
-                    swapped_final_512_cxhxw_uint8 = self.models_processor.apply_denoiser_unet(
-                        swapped_final_512_cxhxw_uint8, default_unet_fallback,
-                        denoiser_mode=control.get('DenoiserModeSelection', "Single Step (Fast)"),
-                        frame_number_for_seed=self.frame_number, # Pass frame number
-                        denoiser_single_step_t=control.get('DenoiserSingleStepTimestepSlider', 10),
-                        denoiser_ddim_steps=control.get('DenoiserDDIMStepsSlider', 50),
-                        denoiser_ddim_eta=control.get('DenoiserDDIMEtaDecimalSlider', 0.0)
-                    )
-                else:
-                    print(f"Frame {self.frame_number}, Face: UNet Denoiser enabled but no valid model selected or default fallback '{default_unet_fallback}' found.")
+            swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(swapped_final_512_cxhxw_uint8, control, frame_seed_offset=0)
+
         if parameters['FaceExpressionEnableToggle']:
             swapped_final_512_cxhxw_uint8 = self.apply_face_expression_restorer(original_face_512_cxhxw_uint8, swapped_final_512_cxhxw_uint8, parameters)
 
@@ -1268,6 +1279,10 @@ class FrameWorker(threading.Thread):
         
         if parameters["FaceRestorerEnable2Toggle"]:
             swapped_final_512_cxhxw_uint8 = self.models_processor.apply_facerestorer(swapped_final_512_cxhxw_uint8, parameters['FaceRestorerDetType2Selection'], parameters['FaceRestorerType2Selection'], parameters["FaceRestorerBlend2Slider"], parameters['FaceFidelityWeight2DecimalSlider'], control['DetectorScoreSlider']/100.0)
+
+        # --- Second Denoiser Pass (after restorers) ---
+        if control.get('DenoiserUNetEnableToggle', False) and control.get('DenoiserAfterRestorersToggle', False):
+            swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(swapped_final_512_cxhxw_uint8, control, frame_seed_offset=1000) # Use a different seed offset
 
         if parameters["OccluderEnableToggle"]:
             mask = self.models_processor.apply_occlusion(original_face_256_for_masks, parameters["OccluderSizeSlider"])
