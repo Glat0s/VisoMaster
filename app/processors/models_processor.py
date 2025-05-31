@@ -220,6 +220,17 @@ class ModelsProcessor(QtCore.QObject):
         self.clip_session = []
         gc.collect()
 
+    def unload_model(self, model_name_to_unload):
+        with self.model_lock:
+            if model_name_to_unload in self.models and self.models[model_name_to_unload] is not None:
+                print(f"Unloading model: {model_name_to_unload}")
+                del self.models[model_name_to_unload]
+                self.models[model_name_to_unload] = None # Explicitly set to None after del
+                gc.collect()
+                torch.cuda.empty_cache()
+            # else:
+            #     print(f"Model {model_name_to_unload} not found or not loaded for unloading.")
+
     def showModelLoadingProgressBar(self):
         self.main_window.model_load_dialog.show()
 
@@ -514,10 +525,10 @@ class ModelsProcessor(QtCore.QObject):
             self.syncvec.cpu()
         self.models[model_name].run_with_iobinding(io_binding)
 
-    def run_vae_decoder(self, scaled_latent_input_tensor: torch.Tensor, output_image_tensor: torch.Tensor):
+    def run_vae_decoder(self, latent_input_tensor: torch.Tensor, output_image_tensor: torch.Tensor):
         """
         Runs the VAE decoder model.
-        scaled_latent_input_tensor: Batch x 8 x LatentH x LatentW, float32
+        latent_input_tensor: Batch x 8 x LatentH x LatentW, float32 (expected to be unscaled by vae_scale_factor as per denoiser usage)
         output_image_tensor: Placeholder for Batch x 3 x H x W, float32, normalized to [-1, 1]
         """
         model_name = 'RefLDMVAEDecoder'
@@ -525,7 +536,7 @@ class ModelsProcessor(QtCore.QObject):
             self.models[model_name] = self.load_model(model_name)
 
         io_binding = self.models[model_name].io_binding()
-        io_binding.bind_input(name='scaled_latent_input', device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(scaled_latent_input_tensor.shape), buffer_ptr=scaled_latent_input_tensor.data_ptr())
+        io_binding.bind_input(name='scaled_latent_input', device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(latent_input_tensor.shape), buffer_ptr=latent_input_tensor.data_ptr()) # Assuming ONNX node name is 'scaled_latent_input'
         io_binding.bind_output(name='image_output', device_type=self.device, device_id=0, element_type=np.float32, shape=tuple(output_image_tensor.shape), buffer_ptr=output_image_tensor.data_ptr())
 
         if self.device == "cuda":
@@ -538,19 +549,34 @@ class ModelsProcessor(QtCore.QObject):
                             image_cxhxw_uint8: torch.Tensor, 
                             unet_filename: str,
                             denoiser_mode: str = "Single Step (Fast)", # New parameter
-                            denoiser_single_step_t: int = 10,       # New parameter # Default t for single step
-                            frame_number_for_seed: int = 0,         # New parameter for seeding
-                            denoiser_ddim_steps: int = 50,          # New parameter
-                            denoiser_ddim_eta: float = 0.0           # New parameter
+                            denoiser_single_step_t: int = 10,       # Default t for single step
+                            frame_number_for_seed: int = 0         # For seeding
                             ) -> torch.Tensor:
         # Input: CxHxW, uint8, RGB, range [0, 255]
         # Output: CxHxW, uint8, RGB, range [0, 255]
         # unet_filename: The specific UNet model file to use.
-        
+
+        if not unet_filename or unet_filename == "No UNet models found":
+            # print(f"Denoiser: No UNet model selected or available ('{unet_filename}'). Skipping denoise pass.")
+            return image_cxhxw_uint8 # Return original image if no model
+
+        unet_model_path = os.path.join(models_dir, unet_filename)
+
+        # If the selected model doesn't exist, try a default fallback
+        if not os.path.exists(unet_model_path):
+            print(f"Denoiser: Selected UNet model file '{unet_model_path}' not found.")
+            default_unet_fallback = "ref_ldm_unet_n1.onnx" # A common default, adjust if needed
+            default_unet_path = os.path.join(models_dir, default_unet_fallback)
+            if os.path.exists(default_unet_path):
+                print(f"Denoiser: Attempting to use default fallback UNet model: {default_unet_fallback}")
+                unet_filename = default_unet_fallback # Switch to default for this run
+            else:
+                print(f"Denoiser: Default fallback UNet model '{default_unet_path}' also not found. Skipping denoise pass.")
+                return image_cxhxw_uint8
+
         # The UNet expects a 64x64 latent. Assuming VAE f=8, input image should be 512x512.
         target_proc_dim = 512 # Denoiser components are trained for 512x512 inputs
         _, h_input, w_input = image_cxhxw_uint8.shape
-
         # Attempt to force deterministic algorithms for the scope of denoiser operations
         old_deterministic_state = torch.are_deterministic_algorithms_enabled()
         #torch.use_deterministic_algorithms(True)
@@ -615,79 +641,25 @@ class ModelsProcessor(QtCore.QObject):
 
         pred_x0_unscaled = torch.empty_like(encoded_latent_8_channel)
 
-        if denoiser_mode == "Single Step (Fast)":
-            # print(f"DEBUG: Denoiser - Mode: Single Step, Timestep t={denoiser_single_step_t}")
-            x0_unscaled_for_noise_addition = encoded_latent_8_channel 
-            timesteps_tensor = torch.tensor([denoiser_single_step_t], dtype=torch.int64, device=self.device)
+        # Always use Single Step Fast mode as DDIM is removed
+        # print(f"DEBUG: Denoiser - Mode: Single Step, Timestep t={denoiser_single_step_t}")
+        x0_unscaled_for_noise_addition = encoded_latent_8_channel 
+        timesteps_tensor = torch.tensor([denoiser_single_step_t], dtype=torch.int64, device=self.device)
 
-            alpha_t_val = self.alphas_cumprod_np[denoiser_single_step_t]
-            sqrt_alpha_bar_t = torch.sqrt(torch.tensor(alpha_t_val, device=self.device, dtype=torch.float32))
-            sqrt_one_minus_alpha_bar_t = torch.sqrt(1.0 - torch.tensor(alpha_t_val, device=self.device, dtype=torch.float32))
+        alpha_t_val = self.alphas_cumprod_np[denoiser_single_step_t]
+        sqrt_alpha_bar_t = torch.sqrt(torch.tensor(alpha_t_val, device=self.device, dtype=torch.float32))
+        sqrt_one_minus_alpha_bar_t = torch.sqrt(1.0 - torch.tensor(alpha_t_val, device=self.device, dtype=torch.float32))
 
-            # Seed for deterministic noise generation for this frame and timestep
-            torch.manual_seed(frame_number_for_seed + denoiser_single_step_t)
-            noise_sample = torch.randn_like(x0_unscaled_for_noise_addition)
-            xt_noisy_unscaled_8_channel = x0_unscaled_for_noise_addition * sqrt_alpha_bar_t + noise_sample * sqrt_one_minus_alpha_bar_t
-            # print(f"DEBUG: Denoiser - xt_noisy_unscaled_8_channel (UNSCALED x_t for UNet 'noisy' part) min: {xt_noisy_unscaled_8_channel.min():.4f}, max: {xt_noisy_unscaled_8_channel.max():.4f}, mean: {xt_noisy_unscaled_8_channel.mean():.4f}")
+        # Seed for deterministic noise generation for this frame and timestep
+        torch.manual_seed(frame_number_for_seed + denoiser_single_step_t)
+        noise_sample = torch.randn_like(x0_unscaled_for_noise_addition)
+        xt_noisy_unscaled_8_channel = x0_unscaled_for_noise_addition * sqrt_alpha_bar_t + noise_sample * sqrt_one_minus_alpha_bar_t
 
-            unet_input_16_channel = torch.cat((xt_noisy_unscaled_8_channel, lq_latent_scaled_for_unet), dim=1)
-            predicted_noise_from_unet = torch.empty((1, 8, latent_h, latent_w), dtype=torch.float32, device=self.device).contiguous()
-            self.run_ref_ldm_unet(unet_filename, unet_input_16_channel, timesteps_tensor, dummy_context, dummy_class_labels, is_ref_flag, predicted_noise_from_unet)
-            # print(f"DEBUG: Denoiser - predicted_noise_from_unet (UNet output, assumed EPS) min: {predicted_noise_from_unet.min():.4f}, max: {predicted_noise_from_unet.max():.4f}, mean: {predicted_noise_from_unet.mean():.4f}")
-            
-            pred_x0_unscaled = (xt_noisy_unscaled_8_channel - sqrt_one_minus_alpha_bar_t * predicted_noise_from_unet) / sqrt_alpha_bar_t
-
-        elif denoiser_mode == "DDIM Loop (Quality)":
-            # print(f"DEBUG: Denoiser - Mode: DDIM Loop, Steps: {denoiser_ddim_steps}, Eta: {denoiser_ddim_eta}, Frame: {frame_number_for_seed}")
-            # Seed for deterministic initial noise generation for this frame
-            torch.manual_seed(frame_number_for_seed)
-            # Initial noisy latent (x_T) - unscaled
-            current_latent_unscaled = torch.randn_like(encoded_latent_8_channel)
-            # print(f"  Initial current_latent_unscaled min: {current_latent_unscaled.min():.4f}, max: {current_latent_unscaled.max():.4f}, mean: {current_latent_unscaled.mean():.4f}")
-            # Timesteps for DDIM
-            ddim_timesteps_np = np.linspace(0, self.alphas_cumprod_np.shape[0] - 1, denoiser_ddim_steps, dtype=int)[::-1].copy()
-
-            for i, t_current_val in enumerate(ddim_timesteps_np):
-                t_prev_val = ddim_timesteps_np[i + 1] if i < denoiser_ddim_steps - 1 else -1
-                # print(f"  DDIM Step {i+1}/{denoiser_ddim_steps}: t_current={t_current_val}, t_prev={t_prev_val}")
-                timesteps_tensor = torch.tensor([t_current_val], dtype=torch.int64, device=self.device)
-                unet_input_16_channel = torch.cat((current_latent_unscaled, lq_latent_scaled_for_unet), dim=1)
-                
-                predicted_noise_from_unet_loop = torch.empty_like(current_latent_unscaled)
-                self.run_ref_ldm_unet(unet_filename, unet_input_16_channel, timesteps_tensor, dummy_context, dummy_class_labels, is_ref_flag, predicted_noise_from_unet_loop)
-
-                alpha_t = self.alphas_cumprod_torch[t_current_val]
-                alpha_t_prev = self.alphas_cumprod_torch[t_prev_val] if t_prev_val >= 0 else torch.tensor(1.0, device=self.device)
-
-                sqrt_alpha_t = torch.sqrt(alpha_t)
-                sqrt_one_minus_alpha_t = torch.sqrt(1.0 - alpha_t)
-                
-                # Predicted x0
-                pred_x0_step = (current_latent_unscaled - sqrt_one_minus_alpha_t * predicted_noise_from_unet_loop) / sqrt_alpha_t
-                
-                # Sigma for DDIM
-                sigma_t = 0.0
-                if denoiser_ddim_eta > 0:
-                    variance = (1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev)
-                    sigma_t = denoiser_ddim_eta * torch.sqrt(variance.clamp(min=1e-20))
-
-                # Direction pointing to x_t
-                dir_xt = torch.sqrt((1.0 - alpha_t_prev - sigma_t**2).clamp(min=0.0)) * predicted_noise_from_unet_loop
-                
-                # Noise for stochasticity
-                if denoiser_ddim_eta > 0 and sigma_t > 1e-6: # Add noise only if eta and sigma are non-zero
-                    # Seed per step for reproducible stochasticity for this frame & step
-                    torch.manual_seed(frame_number_for_seed + t_current_val + i)
-                    noise_t = torch.randn_like(current_latent_unscaled) * sigma_t
-                else:
-                    noise_t = torch.zeros_like(current_latent_unscaled) # Ensure no noise for deterministic DDIM
-                current_latent_unscaled = torch.sqrt(alpha_t_prev) * pred_x0_step + dir_xt + noise_t
-            
-            pred_x0_unscaled = pred_x0_step # The final x0 prediction
-
-        else: # Fallback or error
-            print(f"Warning: Unknown denoiser mode '{denoiser_mode}'. Using original face.")
-            pred_x0_unscaled = encoded_latent_8_channel # Fallback to original unscaled latent
+        unet_input_16_channel = torch.cat((xt_noisy_unscaled_8_channel, lq_latent_scaled_for_unet), dim=1)
+        predicted_noise_from_unet = torch.empty((1, 8, latent_h, latent_w), dtype=torch.float32, device=self.device).contiguous()
+        self.run_ref_ldm_unet(unet_filename, unet_input_16_channel, timesteps_tensor, dummy_context, dummy_class_labels, is_ref_flag, predicted_noise_from_unet)
+        
+        pred_x0_unscaled = (xt_noisy_unscaled_8_channel - sqrt_one_minus_alpha_bar_t * predicted_noise_from_unet) / sqrt_alpha_bar_t
 
         # Latent masking removed as it might be causing white backgrounds.
 

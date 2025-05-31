@@ -227,4 +227,85 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'help': 'Multiplier value for Retargeting Lips.'
         },
     },
+    'UNet Denoiser': {
+        'DenoiserUNetModelSelection': {
+            'level': 1,
+            'widget_type': 'SelectionBox',
+            'label': 'UNet Denoiser Model',
+            'control_name': 'DenoiserUNetModelSelection',
+            'options': [], # Populated dynamically by MainWindow
+            'default': "",
+            'help': 'Select the UNet denoiser ONNX model file. Models should be placed in the model_assets folder and start with "ref_ldm_unet_".'
+        },
+        'DenoiserBaseSeedSlider': {
+            'level': 1,
+            'widget_type': 'ParameterSlider',
+            'label': 'Base Seed',
+            'control_name': 'DenoiserBaseSeedSlider',
+            'min_value': '0', 'max_value': '999999', 'default': '0', 'step': 1,
+            'help': 'Set a fixed base seed for the denoiser. This seed will be used for all frames and both denoiser passes (if applicable) to ensure consistent noise patterns.'
+        },
+        'DenoiserUNetEnableBeforeRestorersToggle': {
+            'level': 1,
+            'widget_type': 'ToggleButton',
+            'label': 'Enable Denoiser (Before Restorers)',
+            'control_name': 'DenoiserUNetEnableBeforeRestorersToggle',
+            'default': False,
+            'help': 'Enable UNet-based image denoising. This is applied to the 512x512 aligned/swapped face before other restorers.'
+        },
+        'DenoiserModeSelectionBefore': {
+            'level': 2,
+            'widget_type': 'SelectionBox',
+            'label': 'Denoiser Mode (Before)',
+            'control_name': 'DenoiserModeSelectionBefore',
+            'options': ["Single Step (Fast)"],
+            'default': "Single Step (Fast)",
+            'parentToggle': 'DenoiserUNetEnableBeforeRestorersToggle',
+            'requiredToggleValue': True,
+            'help': 'Denoising mode for the pass before restorers. Single Step is generally faster.'
+        },
+        'DenoiserSingleStepTimestepSliderBefore': {
+            'level': 3,
+            'widget_type': 'ParameterSlider',
+            'label': 'Single Step Timestep (t) (Before)',
+            'control_name': 'DenoiserSingleStepTimestepSliderBefore',
+            'min_value': '1', 'max_value': '999', 'default': '10', 'step': 1, # Max value was 200, can be higher for single step
+            'parentToggle': 'DenoiserUNetEnableBeforeRestorersToggle',
+            'requiredToggleValue': True,
+            'parentSelection': 'DenoiserModeSelectionBefore',
+            'requiredSelectionValue': "Single Step (Fast)",
+            'help': 'Timestep for single-step denoising (Before Restorers). Lower values mean less noise added/removed.'
+        },
+        'DenoiserAfterRestorersToggle': {
+            'level': 1,
+            'widget_type': 'ToggleButton',
+            'label': 'Enable Denoiser After Restorers',
+            'control_name': 'DenoiserAfterRestorersToggle',
+            'default': False,
+            'help': 'Apply the UNet Denoiser again after face restorers have been applied. Uses the same UNet model and step settings.'
+        },
+        'DenoiserModeSelectionAfter': {
+            'level': 2,
+            'widget_type': 'SelectionBox',
+            'label': 'Denoiser Mode (After)',
+            'control_name': 'DenoiserModeSelectionAfter',
+            'options': ["Single Step (Fast)"],
+            'default': "Single Step (Fast)",
+            'parentToggle': 'DenoiserAfterRestorersToggle',
+            'requiredToggleValue': True,
+            'help': 'Denoising mode for the pass after restorers. Single Step is generally faster.'
+        },
+        'DenoiserSingleStepTimestepSliderAfter': {
+            'level': 3,
+            'widget_type': 'ParameterSlider',
+            'label': 'Single Step Timestep (t) (After)',
+            'control_name': 'DenoiserSingleStepTimestepSliderAfter',
+            'min_value': '1', 'max_value': '999', 'default': '10', 'step': 1, # Max value was 200
+            'parentToggle': 'DenoiserAfterRestorersToggle',
+            'requiredToggleValue': True,
+            'parentSelection': 'DenoiserModeSelectionAfter',
+            'requiredSelectionValue': "Single Step (Fast)",
+            'help': 'Timestep for single-step denoising (After Restorers). Lower values mean less noise added/removed.'
+        }
+    }
 }

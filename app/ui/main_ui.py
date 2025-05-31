@@ -74,6 +74,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.parameters_list = {}
         self.control: ControlTypes = {}
         self.parameter_widgets: ParametersWidgetTypes = {}
+        self.previous_unet_model_selection = "" # To track changes for UNet model
         self.loaded_embedding_filename: str = ''
         
         self.last_target_media_folder_path = ''
@@ -185,18 +186,41 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.faceMaskCheckBox.clicked.connect(partial(video_control_actions.process_compare_checkboxes, self))
         self.faceCompareCheckBox.clicked.connect(partial(video_control_actions.process_compare_checkboxes, self))
 
-        layout_actions.add_widgets_to_tab_layout(self, LAYOUT_DATA=COMMON_LAYOUT_DATA, layoutWidget=self.commonWidgetsLayout, data_type='parameter')
+        # Split COMMON_LAYOUT_DATA processing: 'UNet Denoiser' as control, others as parameter
+        common_parameters_layout_data = {}
+        common_controls_layout_data = {}
+
+        for group_name, widgets_in_group in COMMON_LAYOUT_DATA.items():
+            if group_name == 'UNet Denoiser':
+                common_controls_layout_data[group_name] = widgets_in_group
+            else:
+                common_parameters_layout_data[group_name] = widgets_in_group
+
+        if common_parameters_layout_data:
+            layout_actions.add_widgets_to_tab_layout(self, LAYOUT_DATA=common_parameters_layout_data, layoutWidget=self.commonWidgetsLayout, data_type='parameter')
+        if common_controls_layout_data: # Check if it's not empty (i.e., UNet Denoiser group exists)
+            layout_actions.add_widgets_to_tab_layout(self, LAYOUT_DATA=common_controls_layout_data, layoutWidget=self.commonWidgetsLayout, data_type='control')
+        
         layout_actions.add_widgets_to_tab_layout(self, LAYOUT_DATA=SWAPPER_LAYOUT_DATA, layoutWidget=self.swapWidgetsLayout, data_type='parameter')
         layout_actions.add_widgets_to_tab_layout(self, LAYOUT_DATA=SETTINGS_LAYOUT_DATA, layoutWidget=self.settingsWidgetsLayout, data_type='control')
         layout_actions.add_widgets_to_tab_layout(self, LAYOUT_DATA=FACE_EDITOR_LAYOUT_DATA, layoutWidget=self.faceEditorWidgetsLayout, data_type='parameter')
 
         # Set up output folder select button (It is inside the settings tab Widget)
         self.outputFolderButton.clicked.connect(partial(list_view_actions.select_output_media_folder, self))
-        # Create a control value for OutputMediaFolder
         common_widget_actions.create_control(self, 'OutputMediaFolder', '')
+        
+        # Populate UNet models dropdown (must be after common_layout_data widgets are created)
+        self._populate_denoiser_unet_models()
 
         # Initialize current_widget_parameters with default values
         self.current_widget_parameters = ParametersDict(copy.deepcopy(self.default_parameters), self.default_parameters)
+
+        # Connect UNet model selection change handler
+        denoiser_model_selection_widget = self.parameter_widgets.get("DenoiserUNetModelSelection")
+        if denoiser_model_selection_widget and isinstance(denoiser_model_selection_widget, widget_components.SelectionBox):
+            denoiser_model_selection_widget.currentTextChanged.connect(self.handle_unet_model_change)
+            # Initialize previous_unet_model_selection with the current state of the widget AFTER population
+            self.previous_unet_model_selection = denoiser_model_selection_widget.currentText()
 
         # Initialize the button states
         video_control_actions.reset_media_buttons(self)
@@ -210,7 +234,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.tabWidget.setCurrentIndex(0)
         # widget_actions.add_groupbox_and_widgets_from_layout_map(self)
         self.actionVR180Mode.triggered.connect(self.toggle_vr180_mode)
-        self._populate_denoiser_unet_models() # Populate UNet models
 
     def _populate_denoiser_unet_models(self):
         unet_model_files = []
@@ -243,7 +266,24 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 denoiser_model_widget.addItem("No UNet models found")
                 self.control["DenoiserUNetModelSelection"] = "" # No model selected
                 denoiser_model_widget.setCurrentText("No UNet models found")
+    
+    def handle_unet_model_change(self, new_model_name: str):
+        if self.previous_unet_model_selection and \
+           self.previous_unet_model_selection != new_model_name and \
+           self.previous_unet_model_selection != "No UNet models found":
+            print(f"UNet model changed from {self.previous_unet_model_selection} to {new_model_name}. Unloading old model.")
+            self.models_processor.unload_model(self.previous_unet_model_selection)
+        
+        self.control['DenoiserUNetModelSelection'] = new_model_name
+        self.previous_unet_model_selection = new_model_name
+        
+        # If denoiser is enabled (either before or after) AND a valid model is selected, refresh frame.
+        denoiser_enabled_before = self.control.get('DenoiserUNetEnableBeforeRestorersToggle', False)
+        denoiser_enabled_after = self.control.get('DenoiserAfterRestorersToggle', False)
+        valid_model_selected = new_model_name and new_model_name != "No UNet models found"
 
+        if (denoiser_enabled_before or denoiser_enabled_after) and valid_model_selected:
+            common_widget_actions.refresh_frame(self)
     def __init__(self):
         super(MainWindow, self).__init__()
         self.setupUi(self)
