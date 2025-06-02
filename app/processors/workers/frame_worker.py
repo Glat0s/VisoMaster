@@ -525,7 +525,6 @@ class FrameWorker(threading.Thread):
                     best_target_button_std, best_params_pd_std, _ = self._find_best_target_match(
                         fface_data['embedding'], control
                     )
-                                        
                     if best_target_button_std is not None:
                         if swap_button_is_checked_global or edit_button_is_checked_global:
                             arcface_model_for_swap_std = self.models_processor.get_arcface_model(best_params_pd_std['SwapModelSelection'])
@@ -604,29 +603,31 @@ class FrameWorker(threading.Thread):
         return final_img_np_rgb_uint8[..., ::-1] # RGB to BGR
 
     def _apply_denoiser_pass(self, image_tensor_cxhxw_uint8: torch.Tensor, control: dict, pass_suffix: str) -> torch.Tensor:
-        """Helper to apply UNet denoiser based on control settings for a specific pass."""
-        # pass_suffix should be "Before" or "After" to construct keys
+            """Helper to apply UNet denoiser based on control settings for a specific pass."""
+            
+            # Get selected K/V tensor filename (just the name, not full path yet)
+            kv_tensor_file_selected = control.get('ReferenceKVTensorsSelection')
 
-        unet_model_selected = control.get('DenoiserUNetModelSelection')
-        denoiser_seed_from_slider_val = int(control.get('DenoiserBaseSeedSlider', 0)) # Get seed from control
+            use_exclusive_path = control.get('UseReferenceExclusivePathToggle', False) # From new ToggleButton
+            denoiser_seed_from_slider_val = int(control.get('DenoiserBaseSeedSlider', 0))
 
-        # Construct keys based on pass_suffix
-        mode_key = f'DenoiserModeSelection{pass_suffix}'
-        single_step_t_key = f'DenoiserSingleStepTimestepSlider{pass_suffix}'
+            single_step_t_key = f'DenoiserSingleStepTimestepSlider{pass_suffix}'
+            single_step_t_val = control.get(single_step_t_key, 10)
 
-        denoiser_mode_val = control.get(mode_key, "Single Step (Fast)")
-        single_step_t_val = control.get(single_step_t_key, 10)
+            # Check if a K/V file is actually selected. If not, skip.
+            if not kv_tensor_file_selected or kv_tensor_file_selected == "No K/V tensor files found":
+                print(f"Denoiser {pass_suffix}: No K/V tensor file selected. Skipping.")
+                return image_tensor_cxhxw_uint8
 
-        # The ModelsProcessor.apply_denoiser_unet will handle model existence and fallbacks.
-        # Since DDIM is removed, denoiser_mode_val will always be "Single Step (Fast)"
-        denoised_image = self.models_processor.apply_denoiser_unet(
-            image_tensor_cxhxw_uint8,
-            unet_filename=unet_model_selected,
-            denoiser_mode="Single Step (Fast)", # Hardcode as it's the only option
-            frame_number_for_seed=denoiser_seed_from_slider_val,
-            denoiser_single_step_t=int(single_step_t_val)
-        )
-        return denoised_image
+            denoised_image = self.models_processor.apply_denoiser_unet(
+                image_tensor_cxhxw_uint8,
+                reference_kv_filename=kv_tensor_file_selected, # Pass filename
+                use_reference_exclusive_path=use_exclusive_path, # Pass flag
+                denoiser_mode="Single Step (Fast)", # Hardcoded
+                base_seed=denoiser_seed_from_slider_val,
+                denoiser_single_step_t=int(single_step_t_val)
+            )
+            return denoised_image
 
     def keypoints_adjustments(self, kps_5: np.ndarray, parameters: dict) -> np.ndarray:
         # This method modifies kps_5 in place if it's not a copy.
@@ -1260,8 +1261,17 @@ class FrameWorker(threading.Thread):
         # --- Apply UNet Denoiser to the swapped face (before restorers) ---
         # --- First Denoiser Pass (before restorers) ---
         if control.get('DenoiserUNetEnableBeforeRestorersToggle', False):
-            swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(swapped_final_512_cxhxw_uint8, control, "Before")
+            # Ensure K/V is selected, otherwise _apply_denoiser_pass handles it
+            if control.get('ReferenceKVTensorsSelection') and control.get('ReferenceKVTensorsSelection') != "No K/V tensor files found":
+                #print("Applying Denoiser BEFORE restorers...")
+                swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(
+                    swapped_final_512_cxhxw_uint8, control, "Before"
+                )
+            else:
+                print("Denoiser BEFORE restorers: No K/V tensor file selected. Skipping.")
 
+        # --- Restorers ---
+        # Face Expression Restorer (LivePortrait)
         if parameters['FaceExpressionEnableToggle']:
             swapped_final_512_cxhxw_uint8 = self.apply_face_expression_restorer(original_face_512_cxhxw_uint8, swapped_final_512_cxhxw_uint8, parameters)
 
@@ -1272,8 +1282,13 @@ class FrameWorker(threading.Thread):
             swapped_final_512_cxhxw_uint8 = self.models_processor.apply_facerestorer(swapped_final_512_cxhxw_uint8, parameters['FaceRestorerDetType2Selection'], parameters['FaceRestorerType2Selection'], parameters["FaceRestorerBlend2Slider"], parameters['FaceFidelityWeight2DecimalSlider'], control['DetectorScoreSlider']/100.0)
 
         # --- Second Denoiser Pass (after restorers) ---
-        if control.get('DenoiserAfterRestorersToggle', False) and control.get('DenoiserUNetModelSelection') and control.get('DenoiserUNetModelSelection') != "No UNet models found":
-            swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(swapped_final_512_cxhxw_uint8, control, "After")
+        if control.get('DenoiserAfterRestorersToggle', False):
+            if control.get('ReferenceKVTensorsSelection') and control.get('ReferenceKVTensorsSelection') != "No K/V tensor files found":
+                swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(
+                    swapped_final_512_cxhxw_uint8, control, "After"
+                )
+            else:
+                print("Denoiser AFTER restorers: No K/V tensor file selected. Skipping.")
 
         if parameters["OccluderEnableToggle"]:
             mask = self.models_processor.apply_occlusion(original_face_256_for_masks, parameters["OccluderSizeSlider"])

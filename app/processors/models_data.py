@@ -1,4 +1,6 @@
-models_dir = './model_assets'
+from pathlib import Path
+
+models_dir = str(Path(__file__).resolve().parent.parent.parent / 'model_assets') # More robust path
 assets_repo = "https://github.com/visomaster/visomaster-assets/releases/download"
 
 try:
@@ -478,13 +480,19 @@ models_list = [
     {
         "model_name": "RefLDMVAEEncoder",
         "local_path": f"{models_dir}/ref_ldm_vae_encoder.onnx",
-        "hash": "YOUR_VAE_ENCODER_HASH_HERE", # Replace with actual hash
-        "url": f"{assets_repo}/v_YOUR_VERSION/ref_ldm_vae_encoder.onnx" # Replace with actual URL
+        "hash": "b88d18e79bb0dc2a0d2763e4fd806d6ce7f885a6503a828ab862a7c284d456fc",
+        "url": "https://github.com/Glat0s/ref-ldm-onnx/releases/download/v0.0.1/ref_ldm_vae_encoder.onnx"
     },
     {
         "model_name": "RefLDMVAEDecoder",
         "local_path": f"{models_dir}/ref_ldm_vae_decoder.onnx",
-        "hash": "YOUR_VAE_DECODER_HASH_HERE", # Replace with actual hash
-        "url": f"{assets_repo}/v_YOUR_VERSION/ref_ldm_vae_decoder.onnx" # Replace with actual URL
+        "hash": "eca3065e6a40f4f73a0a14bc810769d07563a351964a0830ad59a481aa00b4f5",
+        "url": "https://github.com/Glat0s/ref-ldm-onnx/releases/download/v0.0.1/ref_ldm_vae_decoder.onnx"
+    },
+    {
+        "model_name": "RefLDM_UNET_EXTERNAL_KV",
+        "local_path": f"{models_dir}/ref_ldm_unet_external_kv.onnx",
+        "hash": "56edbea2aaf0361607645bbe0f35ce07ff8ddce80ee0ef617af305d50d251154",
+        "url": "https://github.com/Glat0s/ref-ldm-onnx/releases/download/v0.0.1/ref_ldm_unet_external_kv.onnx"
     }
 ]

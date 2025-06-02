@@ -6,6 +6,7 @@ import copy
 
 from PySide6 import QtWidgets, QtGui
 from PySide6 import QtCore
+import torch
 
 from app.ui.core.main_window import Ui_MainWindow
 import app.ui.widgets.actions.common_actions as common_widget_actions
@@ -74,7 +75,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.parameters_list = {}
         self.control: ControlTypes = {}
         self.parameter_widgets: ParametersWidgetTypes = {}
-        self.previous_unet_model_selection = "" # To track changes for UNet model
+
+        # UNet related
+        self.previous_kv_file_selection = "" 
+        self.current_kv_tensors_map: Dict[str, torch.Tensor] | None = None
+        self.fixed_unet_model_name = "RefLDM_UNET_EXTERNAL_KV"
+
         self.loaded_embedding_filename: str = ''
         
         self.last_target_media_folder_path = ''
@@ -83,6 +89,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.is_full_screen = False
         self.dfm_models_data = DFM_MODELS_DATA
         # This flag is used to make sure new loaded media is properly fit into the graphics frame on the first load
+
+        # Determine project root and actual models directory path
+        # main_ui.py is in app/ui/, so project root is 3 levels up.
+        self.project_root_path = Path(__file__).resolve().parent.parent.parent
+        self.actual_models_dir_path = self.project_root_path / global_models_dir
         self.loading_new_media = False
 
         self.gpu_memory_update_signal.connect(partial(common_widget_actions.set_gpu_memory_progressbar_value, self))
@@ -90,6 +101,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.model_loading_signal.connect(partial(common_widget_actions.show_model_loading_dialog, self))
         self.model_loaded_signal.connect(partial(common_widget_actions.hide_model_loading_dialog, self))
         self.display_messagebox_signal.connect(partial(common_widget_actions.create_and_show_messagebox, self))
+
     def initialize_widgets(self):
         # Initialize QListWidget for target media
         self.targetVideosList.setFlow(QtWidgets.QListWidget.LeftToRight)
@@ -191,14 +203,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         common_controls_layout_data = {}
 
         for group_name, widgets_in_group in COMMON_LAYOUT_DATA.items():
+            # UNet Denoiser group now contains mostly controls
             if group_name == 'UNet Denoiser':
                 common_controls_layout_data[group_name] = widgets_in_group
-            else:
+            else: # Other groups like 'Face Restorer' are parameters
                 common_parameters_layout_data[group_name] = widgets_in_group
-
+        
         if common_parameters_layout_data:
             layout_actions.add_widgets_to_tab_layout(self, LAYOUT_DATA=common_parameters_layout_data, layoutWidget=self.commonWidgetsLayout, data_type='parameter')
-        if common_controls_layout_data: # Check if it's not empty (i.e., UNet Denoiser group exists)
+        if common_controls_layout_data:
             layout_actions.add_widgets_to_tab_layout(self, LAYOUT_DATA=common_controls_layout_data, layoutWidget=self.commonWidgetsLayout, data_type='control')
         
         layout_actions.add_widgets_to_tab_layout(self, LAYOUT_DATA=SWAPPER_LAYOUT_DATA, layoutWidget=self.swapWidgetsLayout, data_type='parameter')
@@ -208,24 +221,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Set up output folder select button (It is inside the settings tab Widget)
         self.outputFolderButton.clicked.connect(partial(list_view_actions.select_output_media_folder, self))
         common_widget_actions.create_control(self, 'OutputMediaFolder', '')
-        
-        # Populate UNet models dropdown (must be after common_layout_data widgets are created)
-        self._populate_denoiser_unet_models()
 
         # Initialize current_widget_parameters with default values
         self.current_widget_parameters = ParametersDict(copy.deepcopy(self.default_parameters), self.default_parameters)
 
-        # Connect UNet model selection change handler
-        denoiser_model_selection_widget = self.parameter_widgets.get("DenoiserUNetModelSelection")
-        if denoiser_model_selection_widget and isinstance(denoiser_model_selection_widget, widget_components.SelectionBox):
-            denoiser_model_selection_widget.currentTextChanged.connect(self.handle_unet_model_change)
-            # Initialize previous_unet_model_selection with the current state of the widget AFTER population
-            self.previous_unet_model_selection = denoiser_model_selection_widget.currentText()
+        # Populate Reference K/V Tensors dropdown (AFTER connecting the signal)
+        self._populate_reference_kv_tensors()
 
         # Initialize the button states
         video_control_actions.reset_media_buttons(self)
 
-        #Set GPU Memory Progressbar
+        # Set GPU Memory Progressbar
         font = self.vramProgressBar.font()
         font.setBold(True)
         self.vramProgressBar.setFont(font)
@@ -235,55 +241,76 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # widget_actions.add_groupbox_and_widgets_from_layout_map(self)
         self.actionVR180Mode.triggered.connect(self.toggle_vr180_mode)
 
-    def _populate_denoiser_unet_models(self):
-        unet_model_files = []
-        # default_unet_model = "ref_ldm_unet_real_refs_n1.onnx" # Prioritize based on existence and sorting later
+    def _populate_reference_kv_tensors(self):
+        kv_tensor_files = []
+        # Define the directory for K/V tensor files
+        # global_models_dir points to 'model_assets'
+        kv_tensors_dir = os.path.join(global_models_dir, "reference_kv_data")
 
-        if os.path.exists(global_models_dir):
-            for f_name in os.listdir(global_models_dir):
-                if f_name.startswith("ref_ldm_unet_") and f_name.endswith(".onnx"):
-                    unet_model_files.append(f_name)
+        if os.path.exists(kv_tensors_dir):
+            for f_name in os.listdir(kv_tensors_dir):
+                kv_tensor_files.append(f_name)
         
-        # Ensure the default model is in the list if it exists, and prioritize it
-        unet_model_files.sort() # Sort alphabetically for consistent order
+        kv_tensor_files.sort() # Sort alphabetically for consistent order
 
-        denoiser_model_widget = self.parameter_widgets.get("DenoiserUNetModelSelection")
-        if denoiser_model_widget and isinstance(denoiser_model_widget, widget_components.SelectionBox):
-            current_selection_in_control = self.control.get("DenoiserUNetModelSelection")
-            denoiser_model_widget.clear()
+        # Assuming the widget control name is 'ReferenceKVTensorsSelection'
+        kv_tensor_widget = self.parameter_widgets.get("ReferenceKVTensorsSelection")
+        if kv_tensor_widget and isinstance(kv_tensor_widget, widget_components.SelectionBox):
+            current_selection_in_control = self.control.get("ReferenceKVTensorsSelection")
+            kv_tensor_widget.clear()
 
-            if unet_model_files:
-                denoiser_model_widget.addItems(unet_model_files)
+            if kv_tensor_files:
+                kv_tensor_widget.addItems(kv_tensor_files)
                 
-                # If a previous selection exists and is still valid, keep it. Otherwise, pick the first.
-                if not current_selection_in_control or current_selection_in_control not in unet_model_files:
-                    new_selection = unet_model_files[0]
-                    self.control["DenoiserUNetModelSelection"] = new_selection
-                    denoiser_model_widget.setCurrentText(new_selection)
+                if not current_selection_in_control or current_selection_in_control not in kv_tensor_files:
+                    new_selection = kv_tensor_files[0]
+                    self.control["ReferenceKVTensorsSelection"] = new_selection
+                    kv_tensor_widget.setCurrentText(new_selection)
                 else:
-                    denoiser_model_widget.setCurrentText(current_selection_in_control)
+                    kv_tensor_widget.setCurrentText(current_selection_in_control)
             else:
-                denoiser_model_widget.addItem("No UNet models found")
-                self.control["DenoiserUNetModelSelection"] = "" # No model selected
-                denoiser_model_widget.setCurrentText("No UNet models found")
+                kv_tensor_widget.addItem("No K/V Tensors found")
+                self.control["ReferenceKVTensorsSelection"] = "" # No file selected
+                kv_tensor_widget.setCurrentText("No K/V Tensors found")
     
-    def handle_unet_model_change(self, new_model_name: str):
-        if self.previous_unet_model_selection and \
-           self.previous_unet_model_selection != new_model_name and \
-           self.previous_unet_model_selection != "No UNet models found":
-            print(f"UNet model changed from {self.previous_unet_model_selection} to {new_model_name}. Unloading old model.")
-            self.models_processor.unload_model(self.previous_unet_model_selection)
+    def handle_reference_kv_file_change(self, new_kv_file_name: str): 
+
+        # Always try to unload/load
+        self.current_kv_tensors_map = None 
         
-        self.control['DenoiserUNetModelSelection'] = new_model_name
-        self.previous_unet_model_selection = new_model_name
+        self.control['ReferenceKVTensorsSelection'] = new_kv_file_name 
+        self.previous_kv_file_selection = new_kv_file_name
         
-        # If denoiser is enabled (either before or after) AND a valid model is selected, refresh frame.
+        if new_kv_file_name and new_kv_file_name != "No K/V tensor files found":
+            # Use the robustly calculated path
+            kv_file_path = self.actual_models_dir_path / "reference_kv_data" / new_kv_file_name
+            if kv_file_path.exists():
+                try:
+                    self.model_loading_signal.emit() 
+                    kv_payload = torch.load(kv_file_path, map_location='cpu', weights_only=True) 
+                    self.current_kv_tensors_map = kv_payload.get("kv_map")
+                    if self.current_kv_tensors_map:
+                        print(f"Successfully loaded K/V map from {new_kv_file_name} for {len(self.current_kv_tensors_map)} layers.")
+                    else:
+                        print(f"Warning: 'kv_map' not found in {new_kv_file_name}.")
+                        self.current_kv_tensors_map = None
+                    self.model_loaded_signal.emit() 
+                except Exception as e:
+                    print(f"Error loading K/V tensor file {kv_file_path}: {e}")
+                    self.current_kv_tensors_map = None
+                    self.model_loaded_signal.emit()
+            else:
+                print(f"K/V tensor file not found: {kv_file_path}")
+                self.current_kv_tensors_map = None
+        else:
+            self.current_kv_tensors_map = None
+
         denoiser_enabled_before = self.control.get('DenoiserUNetEnableBeforeRestorersToggle', False)
         denoiser_enabled_after = self.control.get('DenoiserAfterRestorersToggle', False)
-        valid_model_selected = new_model_name and new_model_name != "No UNet models found"
 
-        if (denoiser_enabled_before or denoiser_enabled_after) and valid_model_selected:
+        if (denoiser_enabled_before or denoiser_enabled_after) and self.current_kv_tensors_map is not None:
             common_widget_actions.refresh_frame(self)
+
     def __init__(self):
         super(MainWindow, self).__init__()
         self.setupUi(self)
@@ -358,8 +385,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 self.actionVR180Mode.setChecked(True)
             else:
                 self.actionVR180Mode.setChecked(False)
-            # Re-populate and set current selection for dynamic widgets like DenoiserUNetModelSelection
-            self._populate_denoiser_unet_models()
+            self._populate_reference_kv_tensors()
             
     def save_last_workspace(self):
         pass

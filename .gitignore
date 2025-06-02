@@ -8,8 +8,9 @@
 *.timing
 *.dfm
 *.trt
-models/liveportrait_onnx/*.onnx
-models/liveportrait_onnx/*.trt
+model_assets/reference_kv_data/
+model_assets/liveportrait_onnx/*.onnx
+model_assets/liveportrait_onnx/*.trt
 saved_parameters*.json
 startup_parameters*.json
 data.json

@@ -64,3 +64,33 @@ def toggle_virtualcam(main_window: 'MainWindow', toggle_value=False):
 def enable_virtualcam(main_window: 'MainWindow', backend):
     print('backend', backend)
     main_window.video_processor.enable_virtualcam(backend=backend)
+
+def handle_denoiser_state_change(main_window: 'MainWindow', new_value_of_toggle_that_just_changed: bool, control_name_that_changed: str):
+    """
+    Manages loading/unloading of denoiser models (UNet, VAEs) based on UI toggle states.
+    The actual frame refresh is handled by the `update_control` function after this.
+    """
+    # Determine the state of denoisers *as they were* before this change
+    # main_window.control still holds the old values for all controls at this point within exec_function
+    old_before_enabled = main_window.control.get('DenoiserUNetEnableBeforeRestorersToggle', False)
+    old_after_enabled = main_window.control.get('DenoiserAfterRestorersToggle', False)
+    denoiser_was_active = old_before_enabled or old_after_enabled
+
+    # Determine the state of denoisers *as they will be* after this change
+    is_now_before_enabled = old_before_enabled # Default to old state
+    is_now_after_enabled = old_after_enabled   # Default to old state
+
+    if control_name_that_changed == 'DenoiserUNetEnableBeforeRestorersToggle':
+        is_now_before_enabled = new_value_of_toggle_that_just_changed
+    elif control_name_that_changed == 'DenoiserAfterRestorersToggle':
+        is_now_after_enabled = new_value_of_toggle_that_just_changed
+    
+    any_denoiser_will_be_active = is_now_before_enabled or is_now_after_enabled
+    
+    if any_denoiser_will_be_active:
+        main_window.models_processor.ensure_denoiser_models_loaded()
+    else: # No denoiser will be active
+        if denoiser_was_active: # Was on, now off
+            main_window.models_processor.unload_denoiser_models()
+    
+    # Frame refresh is handled by common_actions.update_control after this function returns.

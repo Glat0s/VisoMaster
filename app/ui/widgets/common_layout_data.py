@@ -1,5 +1,6 @@
 from app.helpers.typing_helper import LayoutDictTypes
 import app.ui.widgets.actions.layout_actions as layout_actions
+import app.ui.widgets.actions.control_actions as control_actions
 
 COMMON_LAYOUT_DATA: LayoutDictTypes = {
     # 'Face Compare':{
@@ -228,21 +229,32 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
         },
     },
     'UNet Denoiser': {
-        'DenoiserUNetModelSelection': {
-            'level': 1,
+        'ReferenceKVTensorsSelection': {
+            'level': 1, # Or your desired layout level
             'widget_type': 'SelectionBox',
-            'label': 'UNet Denoiser Model',
-            'control_name': 'DenoiserUNetModelSelection',
-            'options': [], # Populated dynamically by MainWindow
-            'default': "",
-            'help': 'Select the UNet denoiser ONNX model file. Models should be placed in the model_assets folder and start with "ref_ldm_unet_".'
+            'label': 'Reference K/V Tensors',
+            'control_name': 'ReferenceKVTensorsSelection',
+            'options': [], # Will be populated by _populate_reference_kv_tensors
+            'default': "", # Or a default filename if applicable
+            # Add any 'condition_control' or 'parentToggle' if needed
+            'help': 'Select a Reference K/V Tensor file (*.pt). Files must be in "model_assets/reference_kv_data/".',
+            'exec_function': lambda mw, val: mw.handle_reference_kv_file_change(val), # Trigger loading on UI change
+            'exec_function_args': [] # No extra args needed
+        },
+        'UseReferenceExclusivePathToggle': { # New ToggleButton
+            'level': 1,
+            'widget_type': 'ToggleButton',
+            'label': 'Exclusive Reference Path',
+            'control_name': 'UseReferenceExclusivePathToggle',
+            'default': False,
+            'help': 'If enabled, forces the UNet to use only reference K/V for attention, maximizing focus on the reference features.'
         },
         'DenoiserBaseSeedSlider': {
             'level': 1,
             'widget_type': 'ParameterSlider',
             'label': 'Base Seed',
             'control_name': 'DenoiserBaseSeedSlider',
-            'min_value': '0', 'max_value': '999999', 'default': '0', 'step': 1,
+            'min_value': '0', 'max_value': '999999', 'default': '1', 'step': 1,
             'help': 'Set a fixed base seed for the denoiser. This seed will be used for all frames and both denoiser passes (if applicable) to ensure consistent noise patterns.'
         },
         'DenoiserUNetEnableBeforeRestorersToggle': {
@@ -251,7 +263,9 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'label': 'Enable Denoiser (Before Restorers)',
             'control_name': 'DenoiserUNetEnableBeforeRestorersToggle',
             'default': False,
-            'help': 'Enable UNet-based image denoising. This is applied to the 512x512 aligned/swapped face before other restorers.'
+            'help': 'Enable UNet-based image denoising. This is applied to the 512x512 aligned/swapped face before other restorers.',
+            'exec_function': control_actions.handle_denoiser_state_change,
+            'exec_function_args': ['DenoiserUNetEnableBeforeRestorersToggle'],
         },
         'DenoiserModeSelectionBefore': {
             'level': 2,
@@ -269,7 +283,7 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterSlider',
             'label': 'Single Step Timestep (t) (Before)',
             'control_name': 'DenoiserSingleStepTimestepSliderBefore',
-            'min_value': '1', 'max_value': '999', 'default': '10', 'step': 1, # Max value was 200, can be higher for single step
+            'min_value': '1', 'max_value': '999', 'default': '1', 'step': 1, # Max value was 200, can be higher for single step
             'parentToggle': 'DenoiserUNetEnableBeforeRestorersToggle',
             'requiredToggleValue': True,
             'parentSelection': 'DenoiserModeSelectionBefore',
@@ -282,7 +296,9 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'label': 'Enable Denoiser After Restorers',
             'control_name': 'DenoiserAfterRestorersToggle',
             'default': False,
-            'help': 'Apply the UNet Denoiser again after face restorers have been applied. Uses the same UNet model and step settings.'
+            'help': 'Apply the UNet Denoiser again after face restorers have been applied. Uses the same UNet model and step settings.',
+            'exec_function': control_actions.handle_denoiser_state_change,
+            'exec_function_args': ['DenoiserAfterRestorersToggle'],
         },
         'DenoiserModeSelectionAfter': {
             'level': 2,
@@ -300,7 +316,7 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterSlider',
             'label': 'Single Step Timestep (t) (After)',
             'control_name': 'DenoiserSingleStepTimestepSliderAfter',
-            'min_value': '1', 'max_value': '999', 'default': '10', 'step': 1, # Max value was 200
+            'min_value': '1', 'max_value': '999', 'default': '1', 'step': 1, # Max value was 200
             'parentToggle': 'DenoiserAfterRestorersToggle',
             'requiredToggleValue': True,
             'parentSelection': 'DenoiserModeSelectionAfter',

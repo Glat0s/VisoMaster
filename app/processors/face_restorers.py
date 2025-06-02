@@ -1,6 +1,6 @@
 
-from typing import TYPE_CHECKING
-
+from typing import TYPE_CHECKING, Dict
+import os
 import torch
 import numpy as np
 from torchvision.transforms import v2
@@ -110,6 +110,155 @@ class FaceRestorers:
         outpred = torch.add(torch.mul(outpred, alpha), torch.mul(swapped_face_upscaled, 1-alpha))
 
         return outpred
+
+    def run_vae_encoder(self, image_input_tensor: torch.Tensor, output_latent_tensor: torch.Tensor):
+        """
+        Runs the VAE encoder model.
+        image_input_tensor: Batch x 3 x Height x Width, float32, normalized to [-1, 1]
+        output_latent_tensor: Placeholder for Batch x 8 x LatentH x LatentW, float32
+        """
+        model_name = 'RefLDMVAEEncoder'
+        ort_session = self.models_processor.models[model_name]
+        if not ort_session:
+            error_msg = f"Error: VAE Encoder model '{model_name}' not loaded when run_vae_encoder was called. This model should be loaded by ModelsProcessor.ensure_denoiser_models_loaded()."
+            print(error_msg)
+            raise RuntimeError(error_msg) # Or handle more gracefully depending on desired behavior
+
+        # Assuming the ONNX model has standard input/output names if not fetched dynamically
+        # For robustness, it's better to get names from the model if possible,
+        # but for this refactor, we'll use the names implied by the previous code.
+        input_name = ort_session.get_inputs()[0].name if ort_session.get_inputs() else 'image_input'
+        output_name = ort_session.get_outputs()[0].name if ort_session.get_outputs() else 'latent_pre_quant_unscaled'
+
+        io_binding = ort_session.io_binding()
+        io_binding.bind_input(name=input_name, device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=tuple(image_input_tensor.shape), buffer_ptr=image_input_tensor.data_ptr())
+        io_binding.bind_output(name=output_name, device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=tuple(output_latent_tensor.shape), buffer_ptr=output_latent_tensor.data_ptr())
+
+        if self.models_processor.device == "cuda":
+            torch.cuda.synchronize()
+        elif self.models_processor.device != "cpu":
+            self.models_processor.syncvec.cpu()
+        ort_session.run_with_iobinding(io_binding)
+
+    def run_vae_decoder(self, latent_input_tensor: torch.Tensor, output_image_tensor: torch.Tensor):
+        """
+        Runs the VAE decoder model.
+        latent_input_tensor: Batch x 8 x LatentH x LatentW, float32
+        output_image_tensor: Placeholder for Batch x 3 x H x W, float32, normalized to [-1, 1]
+        """
+        model_name = 'RefLDMVAEDecoder'
+        ort_session = self.models_processor.models[model_name]
+        if not ort_session:
+            error_msg = f"Error: VAE Decoder model '{model_name}' not loaded when run_vae_decoder was called. This model should be loaded by ModelsProcessor.ensure_denoiser_models_loaded()."
+            print(error_msg)
+            raise RuntimeError(error_msg)
+
+        input_name = ort_session.get_inputs()[0].name if ort_session.get_inputs() else 'scaled_latent_input'
+        output_name = ort_session.get_outputs()[0].name if ort_session.get_outputs() else 'image_output'
+
+        io_binding = ort_session.io_binding()
+        io_binding.bind_input(name=input_name, device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=tuple(latent_input_tensor.shape), buffer_ptr=latent_input_tensor.data_ptr())
+        io_binding.bind_output(name=output_name, device_type=self.models_processor.device, device_id=0, element_type=np.float32, shape=tuple(output_image_tensor.shape), buffer_ptr=output_image_tensor.data_ptr())
+
+        if self.models_processor.device == "cuda":
+            torch.cuda.synchronize()
+        elif self.models_processor.device != "cpu":
+            self.models_processor.syncvec.cpu()
+        ort_session.run_with_iobinding(io_binding)
+
+    def run_ref_ldm_unet(self,
+                         x_noisy_plus_lq_latent: torch.Tensor,
+                         timesteps_tensor: torch.Tensor,
+                         is_ref_flag_tensor: torch.Tensor,
+                         use_reference_exclusive_path_globally_tensor: torch.Tensor,
+                         kv_tensor_map: Dict[str, Dict[str, torch.Tensor]],
+                         output_unet_tensor: torch.Tensor):
+        """
+        Runs the UNet denoiser model with external K/V inputs.
+        """
+        model_name = self.models_processor.main_window.fixed_unet_model_name
+        ort_session = self.models_processor.models.get(model_name)
+
+        if not ort_session:
+            # Enhanced error reporting
+            error_messages = [f"Error: UNet model '{model_name}' not loaded when run_ref_ldm_unet was called."]
+            error_messages.append(f"  This model should be loaded by ModelsProcessor.apply_denoiser_unet or a similar setup routine.")
+            
+            # Check model path
+            model_path = self.models_processor.models_path.get(model_name)
+            if model_path:
+                error_messages.append(f"  Expected model path: {model_path}")
+                if not os.path.exists(model_path):
+                    error_messages.append(f"  Path check: Model file NOT FOUND at this path.")
+                else:
+                    error_messages.append(f"  Path check: Model file FOUND at this path.")
+            else:
+                error_messages.append(f"  Model path for '{model_name}' not found in ModelsProcessor.models_path. Check 'models_data.py' and ModelsProcessor initialization.")
+
+            # Check current providers configured in ModelsProcessor
+            current_providers_config = self.models_processor.providers
+            current_providers_repr = []
+            is_trt_configured_in_providers = False
+            for p_item in current_providers_config:
+                provider_entry_name = p_item[0] if isinstance(p_item, tuple) else p_item
+                current_providers_repr.append(provider_entry_name)
+                if 'TensorrtExecutionProvider' in provider_entry_name:
+                    is_trt_configured_in_providers = True
+            
+            error_messages.append(f"  ModelsProcessor current providers being used for ONNX session: {current_providers_repr}")
+            if is_trt_configured_in_providers:
+                 error_messages.append(f"  TensorRT EP options configured in ModelsProcessor: {self.models_processor.trt_ep_options}")
+            
+            error_messages.append(f"  Suggestion: Review logs from 'ModelsProcessor.load_model' and 'ModelsProcessor.apply_denoiser_unet' for earlier errors regarding '{model_name}'.")
+            
+            print("\n".join(error_messages))
+            return
+
+        onnx_input_names = [inp.name for inp in ort_session.get_inputs()]
+        # Output name is fixed as 'unet_output' based on the provided spec
+        onnx_output_name = "unet_output"
+
+        io_binding = ort_session.io_binding()
+        bind_device_type = self.models_processor.device
+        bind_device_id = 0
+
+        # Bind standard inputs
+        io_binding.bind_input(name='x_noisy_plus_lq_latent', device_type=bind_device_type, device_id=bind_device_id, element_type=np.float32, shape=tuple(x_noisy_plus_lq_latent.shape), buffer_ptr=x_noisy_plus_lq_latent.data_ptr())
+        io_binding.bind_input(name='timesteps', device_type=bind_device_type, device_id=bind_device_id, element_type=np.int64, shape=tuple(timesteps_tensor.shape), buffer_ptr=timesteps_tensor.data_ptr())
+        io_binding.bind_input(name='is_ref_flag_input', device_type=bind_device_type, device_id=bind_device_id, element_type=np.bool_, shape=tuple(is_ref_flag_tensor.shape), buffer_ptr=is_ref_flag_tensor.data_ptr())
+        io_binding.bind_input(name='use_reference_exclusive_path_globally_input', device_type=bind_device_type, device_id=bind_device_id, element_type=np.bool_, shape=tuple(use_reference_exclusive_path_globally_tensor.shape), buffer_ptr=use_reference_exclusive_path_globally_tensor.data_ptr())
+
+        # Bind K/V tensors
+        for pt_module_name, kv_pair in kv_tensor_map.items():
+            onnx_base_name = pt_module_name.replace('.', '_')
+            k_name_onnx = f"{onnx_base_name}_k_ext"
+            v_name_onnx = f"{onnx_base_name}_v_ext"
+
+            k_tensor_original = kv_pair.get('k')
+            v_tensor_original = kv_pair.get('v')
+
+            if k_tensor_original is not None and k_name_onnx in onnx_input_names:
+                k_tensor_batched = k_tensor_original.unsqueeze(0).to(device=bind_device_type, dtype=torch.float32).contiguous()
+                io_binding.bind_input(name=k_name_onnx, device_type=bind_device_type, device_id=bind_device_id, element_type=np.float32, shape=tuple(k_tensor_batched.shape), buffer_ptr=k_tensor_batched.data_ptr())
+            elif k_tensor_original is not None:
+                print(f"Warning: K tensor for {pt_module_name} (as {k_name_onnx}) not found as an input in the ONNX model.")
+
+            if v_tensor_original is not None and v_name_onnx in onnx_input_names:
+                v_tensor_batched = v_tensor_original.unsqueeze(0).to(device=bind_device_type, dtype=torch.float32).contiguous()
+                io_binding.bind_input(name=v_name_onnx, device_type=bind_device_type, device_id=bind_device_id, element_type=np.float32, shape=tuple(v_tensor_batched.shape), buffer_ptr=v_tensor_batched.data_ptr())
+            elif v_tensor_original is not None:
+                print(f"Warning: V tensor for {pt_module_name} (as {v_name_onnx}) not found as an input in the ONNX model.")
+
+        # Bind output
+        io_binding.bind_output(name=onnx_output_name, device_type=bind_device_type, device_id=bind_device_id, element_type=np.float32, shape=tuple(output_unet_tensor.shape), buffer_ptr=output_unet_tensor.data_ptr())
+
+        # Run session
+        if self.models_processor.device == "cuda":
+            torch.cuda.synchronize()
+        elif self.models_processor.device != "cpu":
+            self.models_processor.syncvec.cpu()
+        ort_session.run_with_iobinding(io_binding)
+
 
     def run_GFPGAN(self, image, output):
         if not self.models_processor.models['GFPGANv1.4']:
