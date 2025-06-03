@@ -1278,10 +1278,19 @@ class FrameWorker(threading.Thread):
         if parameters["FaceRestorerEnableToggle"]:
             swapped_final_512_cxhxw_uint8 = self.models_processor.apply_facerestorer(swapped_final_512_cxhxw_uint8, parameters['FaceRestorerDetTypeSelection'], parameters['FaceRestorerTypeSelection'], parameters["FaceRestorerBlendSlider"], parameters['FaceFidelityWeightDecimalSlider'], control['DetectorScoreSlider']/100.0)
 
+        # --- Second Denoiser Pass (after first restorer) ---
+        if control.get('DenoiserAfterFirstRestorerToggle', False):
+            if control.get('ReferenceKVTensorsSelection') and control.get('ReferenceKVTensorsSelection') != "No K/V tensor files found":
+                swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(
+                    swapped_final_512_cxhxw_uint8, control, "After"
+                )
+            else:
+                print("Denoiser AFTER first restorer: No K/V tensor file selected. Skipping.")
+
         if parameters["FaceRestorerEnable2Toggle"]:
             swapped_final_512_cxhxw_uint8 = self.models_processor.apply_facerestorer(swapped_final_512_cxhxw_uint8, parameters['FaceRestorerDetType2Selection'], parameters['FaceRestorerType2Selection'], parameters["FaceRestorerBlend2Slider"], parameters['FaceFidelityWeight2DecimalSlider'], control['DetectorScoreSlider']/100.0)
 
-        # --- Second Denoiser Pass (after restorers) ---
+        # --- Third Denoiser Pass (after restorers) ---
         if control.get('DenoiserAfterRestorersToggle', False):
             if control.get('ReferenceKVTensorsSelection') and control.get('ReferenceKVTensorsSelection') != "No K/V tensor files found":
                 swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(

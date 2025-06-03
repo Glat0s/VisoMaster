@@ -260,7 +260,7 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
         'DenoiserUNetEnableBeforeRestorersToggle': {
             'level': 1,
             'widget_type': 'ToggleButton',
-            'label': 'Enable Denoiser (Before Restorers)',
+            'label': 'Enable Denoiser before Restorers',
             'control_name': 'DenoiserUNetEnableBeforeRestorersToggle',
             'default': False,
             'help': 'Enable UNet-based image denoising. This is applied to the 512x512 aligned/swapped face before other restorers.',
@@ -289,6 +289,39 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'parentSelection': 'DenoiserModeSelectionBefore',
             'requiredSelectionValue': "Single Step (Fast)",
             'help': 'Timestep for single-step denoising (Before Restorers). Lower values mean less noise added/removed.'
+        },
+        'DenoiserAfterFirstRestorerToggle': {
+            'level': 1,
+            'widget_type': 'ToggleButton',
+            'label': 'Enable Denoiser After first Restorer',
+            'control_name': 'DenoiserAfterFirstRestorerToggle',
+            'default': False,
+            'help': 'Apply the UNet Denoiser again after first restorer have been applied. Uses the same UNet model and step settings.',
+            'exec_function': control_actions.handle_denoiser_state_change,
+            'exec_function_args': ['DenoiserAfterFirstRestorerToggle'],
+        },
+        'DenoiserModeSelectionAfterFirst': {
+            'level': 2,
+            'widget_type': 'SelectionBox',
+            'label': 'Denoiser Mode (After)',
+            'control_name': 'DenoiserModeSelectionAfterFirst',
+            'options': ["Single Step (Fast)"],
+            'default': "Single Step (Fast)",
+            'parentToggle': 'DenoiserAfterFirstRestorerToggle',
+            'requiredToggleValue': True,
+            'help': 'Denoising mode for the pass after first restorer. Single Step is generally faster.'
+        },
+        'DenoiserSingleStepTimestepSliderAfterFirst': {
+            'level': 3,
+            'widget_type': 'ParameterSlider',
+            'label': 'Single Step Timestep (t) (After)',
+            'control_name': 'DenoiserSingleStepTimestepSliderAfterFirst',
+            'min_value': '1', 'max_value': '999', 'default': '1', 'step': 1, # Max value was 200
+            'parentToggle': 'DenoiserAfterFirstRestorerToggle',
+            'requiredToggleValue': True,
+            'parentSelection': 'DenoiserModeSelectionAfterFirst',
+            'requiredSelectionValue': "Single Step (Fast)",
+            'help': 'Timestep for single-step denoising (After first Restorer). Lower values mean less noise added/removed.'
         },
         'DenoiserAfterRestorersToggle': {
             'level': 1,
