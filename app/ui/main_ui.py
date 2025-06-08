@@ -204,7 +204,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         for group_name, widgets_in_group in COMMON_LAYOUT_DATA.items():
             # UNet Denoiser group now contains mostly controls
-            if group_name == 'UNet Denoiser':
+            if group_name == 'ReF-LDM Denoiser':
                 common_controls_layout_data[group_name] = widgets_in_group
             else: # Other groups like 'Face Restorer' are parameters
                 common_parameters_layout_data[group_name] = widgets_in_group
