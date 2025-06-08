@@ -241,6 +241,71 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # widget_actions.add_groupbox_and_widgets_from_layout_map(self)
         self.actionVR180Mode.triggered.connect(self.toggle_vr180_mode)
 
+        # Connect Denoiser Mode SelectionBox signals to update visibility
+        denoiser_mode_before_combo = self.parameter_widgets.get('DenoiserModeSelectionBefore')
+        if denoiser_mode_before_combo:
+            # Pass the new text (current_mode_text) from the signal to the handler
+            denoiser_mode_before_combo.currentTextChanged.connect(
+                lambda text, ps="Before": self.update_denoiser_controls_visibility_for_pass(ps, text)
+            )
+            # Initial call using the value from self.control, which should be the default
+            initial_mode_before = self.control.get('DenoiserModeSelectionBefore', "Single Step (Fast)")
+            self.update_denoiser_controls_visibility_for_pass("Before", initial_mode_before)
+
+        denoiser_mode_after_first_combo = self.parameter_widgets.get('DenoiserModeSelectionAfterFirst')
+        if denoiser_mode_after_first_combo:
+            denoiser_mode_after_first_combo.currentTextChanged.connect(
+                lambda text, ps="AfterFirst": self.update_denoiser_controls_visibility_for_pass(ps, text)
+            )
+            initial_mode_after_first = self.control.get('DenoiserModeSelectionAfterFirst', "Single Step (Fast)")
+            self.update_denoiser_controls_visibility_for_pass("AfterFirst", initial_mode_after_first)
+
+        denoiser_mode_after_combo = self.parameter_widgets.get('DenoiserModeSelectionAfter')
+        if denoiser_mode_after_combo:
+            denoiser_mode_after_combo.currentTextChanged.connect(
+                lambda text, ps="After": self.update_denoiser_controls_visibility_for_pass(ps, text)
+            )
+            initial_mode_after = self.control.get('DenoiserModeSelectionAfter', "Single Step (Fast)")
+            self.update_denoiser_controls_visibility_for_pass("After", initial_mode_after)
+
+    def update_denoiser_controls_visibility_for_pass(self, pass_suffix: str, current_mode_text: str):
+        """
+        Updates visibility of denoiser controls for a specific pass (Before, AfterFirst, After)
+        based on the provided current_mode_text.
+        """
+        # current_mode = self.control.get(mode_selection_control_name, "Single Step (Fast)") # Old way
+        current_mode = current_mode_text # Use the passed text directly
+
+        # Define widget names based on the pass_suffix
+        single_step_slider_name = f'DenoiserSingleStepTimestepSlider{pass_suffix}'
+        ddim_steps_slider_name = f'DenoiserDDIMStepsSlider{pass_suffix}'
+        cfg_scale_slider_name = f'DenoiserCFGScaleDecimalSlider{pass_suffix}'
+
+        # Get widget instances from self.parameter_widgets
+        single_step_widget = self.parameter_widgets.get(single_step_slider_name)
+        ddim_steps_widget = self.parameter_widgets.get(ddim_steps_slider_name)
+        cfg_scale_widget = self.parameter_widgets.get(cfg_scale_slider_name)
+
+        # Helper to set visibility for a widget and its associated label and reset button
+        def set_widget_visibility(widget_instance, is_visible):
+            if widget_instance:
+                widget_instance.setVisible(is_visible)
+                if hasattr(widget_instance, 'label_widget') and widget_instance.label_widget:
+                    widget_instance.label_widget.setVisible(is_visible)
+                if hasattr(widget_instance, 'reset_default_button') and widget_instance.reset_default_button:
+                    widget_instance.reset_default_button.setVisible(is_visible)
+                if hasattr(widget_instance, 'line_edit') and widget_instance.line_edit:
+                    widget_instance.line_edit.setVisible(is_visible)
+
+        # Set visibility for Single Step controls
+        is_single_step_mode = (current_mode == "Single Step (Fast)")
+        set_widget_visibility(single_step_widget, is_single_step_mode)
+
+        # Set visibility for Full Restore (DDIM) controls
+        is_full_restore_mode = (current_mode == "Full Restore (DDIM)")
+        set_widget_visibility(ddim_steps_widget, is_full_restore_mode)
+        set_widget_visibility(cfg_scale_widget, is_full_restore_mode)
+
     def _populate_reference_kv_tensors(self):
         kv_tensor_files = []
         # Define the directory for K/V tensor files
@@ -275,41 +340,48 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     
     def handle_reference_kv_file_change(self, new_kv_file_name: str): 
 
-        # Always try to unload/load
-        self.current_kv_tensors_map = None 
-        
-        self.control['ReferenceKVTensorsSelection'] = new_kv_file_name 
-        self.previous_kv_file_selection = new_kv_file_name
-        
-        if new_kv_file_name and new_kv_file_name != "No K/V tensor files found":
-            # Use the robustly calculated path
-            kv_file_path = self.actual_models_dir_path / "reference_kv_data" / new_kv_file_name
-            if kv_file_path.exists():
-                try:
-                    self.model_loading_signal.emit() 
-                    kv_payload = torch.load(kv_file_path, map_location='cpu', weights_only=True) 
-                    self.current_kv_tensors_map = kv_payload.get("kv_map")
-                    if self.current_kv_tensors_map:
-                        print(f"Successfully loaded K/V map from {new_kv_file_name} for {len(self.current_kv_tensors_map)} layers.")
-                    else:
-                        print(f"Warning: 'kv_map' not found in {new_kv_file_name}.")
+        with self.models_processor.model_lock: # Protect access to shared K/V map attributes
+            # Always try to unload/load
+            self.current_kv_tensors_map = None 
+            
+            self.control['ReferenceKVTensorsSelection'] = new_kv_file_name 
+            self.previous_kv_file_selection = new_kv_file_name # Update this under lock
+            
+            if new_kv_file_name and new_kv_file_name != "No K/V tensor files found":
+                # Use the robustly calculated path
+                kv_file_path = self.actual_models_dir_path / "reference_kv_data" / new_kv_file_name
+                if kv_file_path.exists():
+                    try:
+                        self.model_loading_signal.emit() 
+                        kv_payload = torch.load(kv_file_path, map_location='cpu', weights_only=True) 
+                        self.current_kv_tensors_map = kv_payload.get("kv_map")
+                        if self.current_kv_tensors_map:
+                            print(f"Successfully loaded K/V map from {new_kv_file_name} for {len(self.current_kv_tensors_map)} layers.")
+                        else:
+                            print(f"Warning: 'kv_map' not found in {new_kv_file_name}.")
+                            self.current_kv_tensors_map = None
+                        self.model_loaded_signal.emit() 
+                    except Exception as e:
+                        print(f"Error loading K/V tensor file {kv_file_path}: {e}")
                         self.current_kv_tensors_map = None
-                    self.model_loaded_signal.emit() 
-                except Exception as e:
-                    print(f"Error loading K/V tensor file {kv_file_path}: {e}")
+                        self.model_loaded_signal.emit()
+                else:
+                    print(f"K/V tensor file not found: {kv_file_path}")
                     self.current_kv_tensors_map = None
-                    self.model_loaded_signal.emit()
             else:
-                print(f"K/V tensor file not found: {kv_file_path}")
                 self.current_kv_tensors_map = None
-        else:
-            self.current_kv_tensors_map = None
 
+        # Frame refresh logic (outside the lock)
         denoiser_enabled_before = self.control.get('DenoiserUNetEnableBeforeRestorersToggle', False)
+        denoiser_enabled_after_first = self.control.get('DenoiserAfterFirstRestorerToggle', False)
         denoiser_enabled_after = self.control.get('DenoiserAfterRestorersToggle', False)
 
-        if (denoiser_enabled_before or denoiser_enabled_after) and self.current_kv_tensors_map is not None:
-            common_widget_actions.refresh_frame(self)
+        # Refresh frame if any denoiser is active and K/V selection might have changed its state
+        if (denoiser_enabled_before or denoiser_enabled_after_first or denoiser_enabled_after):
+            # Trigger refresh if a K/V file was selected/deselected,
+            # as this affects whether kv_tensor_map_for_this_run will be None or populated.
+            if new_kv_file_name: # True if a file is selected or "No K/V..." is chosen (i.e., selection changed)
+                common_widget_actions.refresh_frame(self)
 
     def __init__(self):
         super(MainWindow, self).__init__()

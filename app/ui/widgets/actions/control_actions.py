@@ -93,6 +93,22 @@ def handle_denoiser_state_change(main_window: 'MainWindow', new_value_of_toggle_
     
     if any_denoiser_will_be_active:
         main_window.models_processor.ensure_denoiser_models_loaded()
+        # If a denoiser section was just activated, update its control visibility
+        pass_suffix_to_update = None
+        if control_name_that_changed == 'DenoiserUNetEnableBeforeRestorersToggle' and new_value_of_toggle_that_just_changed:
+            pass_suffix_to_update = "Before"
+        elif control_name_that_changed == 'DenoiserAfterFirstRestorerToggle' and new_value_of_toggle_that_just_changed:
+            pass_suffix_to_update = "AfterFirst"
+        elif control_name_that_changed == 'DenoiserAfterRestorersToggle' and new_value_of_toggle_that_just_changed:
+            pass_suffix_to_update = "After"
+
+        if pass_suffix_to_update:
+            mode_combo_name = f'DenoiserModeSelection{pass_suffix_to_update}'
+            mode_combo_widget = main_window.parameter_widgets.get(mode_combo_name)
+            if mode_combo_widget:
+                current_mode_text = mode_combo_widget.currentText()
+                main_window.update_denoiser_controls_visibility_for_pass(pass_suffix_to_update, current_mode_text)
+
     else: # No denoiser will be active
         if denoiser_was_active: # Was on, now off
             main_window.models_processor.unload_denoiser_models()

@@ -608,24 +608,47 @@ class FrameWorker(threading.Thread):
             # Get selected K/V tensor filename (just the name, not full path yet)
             kv_tensor_file_selected = control.get('ReferenceKVTensorsSelection')
 
-            use_exclusive_path = control.get('UseReferenceExclusivePathToggle', False) # From new ToggleButton
-            denoiser_seed_from_slider_val = int(control.get('DenoiserBaseSeedSlider', 0))
+            # Determine mode and parameters for the current pass
+            use_exclusive_path = control.get('UseReferenceExclusivePathToggle', False)
+            denoiser_seed_from_slider_val = int(control.get('DenoiserBaseSeedSlider', 1))
+
+            # Determine mode and parameters for the current pass from UI controls
+            denoiser_mode_key = f'DenoiserModeSelection{pass_suffix}'
+            denoiser_mode_val = control.get(denoiser_mode_key, "Single Step (Fast)")
+            
+            #denoiser_post_blur_sigma = float(control.get('DenoiserPostBlurSigmaDecimalSlider', 0.5))
+            #denoiser_post_sharpen_strength = float(control.get('DenoiserPostSharpenStrengthDecimalSlider', 0.25))
+
+            ddim_steps_key = f'DenoiserDDIMStepsSlider{pass_suffix}'
+            ddim_steps_val = int(control.get(ddim_steps_key, 20))
+
+            cfg_scale_key = f'DenoiserCFGScaleDecimalSlider{pass_suffix}'
+            cfg_scale_val = float(control.get(cfg_scale_key, 1.0))
 
             single_step_t_key = f'DenoiserSingleStepTimestepSlider{pass_suffix}'
-            single_step_t_val = control.get(single_step_t_key, 10)
+            single_step_t_val = int(control.get(single_step_t_key, 1))
 
-            # Check if a K/V file is actually selected. If not, skip.
+            # Denoiser will be skipped if K/V is not selected but exclusive path is on,
+            # or if K/V is not selected and mode requires it (handled in apply_denoiser_unet).
             if not kv_tensor_file_selected or kv_tensor_file_selected == "No K/V tensor files found":
-                print(f"Denoiser {pass_suffix}: No K/V tensor file selected. Skipping.")
-                return image_tensor_cxhxw_uint8
+                # Allow proceeding if exclusive path is OFF, UNet might run without K/V.
+                # ModelsProcessor.apply_denoiser_unet will handle skipping if K/V is mandatory for the mode.
+                if use_exclusive_path: # If exclusive path is on, K/V is mandatory.
+                    print(f"Denoiser {pass_suffix}: No K/V tensor file selected, but 'Exclusive Reference Path' is ON. Skipping.")
+                    return image_tensor_cxhxw_uint8
+                # else:
+                    # print(f"Denoiser {pass_suffix}: No K/V tensor file selected. UNet might run without reference.")
 
             denoised_image = self.models_processor.apply_denoiser_unet(
                 image_tensor_cxhxw_uint8,
-                reference_kv_filename=kv_tensor_file_selected, # Pass filename
-                use_reference_exclusive_path=use_exclusive_path, # Pass flag
-                denoiser_mode="Single Step (Fast)", # Hardcoded
+                reference_kv_filename=kv_tensor_file_selected, 
+                use_reference_exclusive_path=use_exclusive_path,
+                denoiser_mode=denoiser_mode_val, 
                 base_seed=denoiser_seed_from_slider_val,
-                denoiser_single_step_t=int(single_step_t_val)
+                denoiser_single_step_t=single_step_t_val,
+                denoiser_ddim_steps=ddim_steps_val,
+                denoiser_cfg_scale=cfg_scale_val
+                # blur_sigma_before_sharpen and sharpen_strength are removed to match inference.py
             )
             return denoised_image
 
@@ -1282,7 +1305,7 @@ class FrameWorker(threading.Thread):
         if control.get('DenoiserAfterFirstRestorerToggle', False):
             if control.get('ReferenceKVTensorsSelection') and control.get('ReferenceKVTensorsSelection') != "No K/V tensor files found":
                 swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(
-                    swapped_final_512_cxhxw_uint8, control, "After"
+                    swapped_final_512_cxhxw_uint8, control, "AfterFirst"
                 )
             else:
                 print("Denoiser AFTER first restorer: No K/V tensor file selected. Skipping.")
