@@ -75,7 +75,7 @@ def handle_denoiser_state_change(main_window: 'MainWindow', new_value_of_toggle_
     old_before_enabled = main_window.control.get('DenoiserUNetEnableBeforeRestorersToggle', False)
     old_after_first_enabled = main_window.control.get('DenoiserAfterFirstRestorerToggle', False)
     old_after_enabled = main_window.control.get('DenoiserAfterRestorersToggle', False)
-    denoiser_was_active = old_before_enabled or old_after_enabled
+    denoiser_was_active = old_before_enabled or old_after_first_enabled or old_after_enabled
 
     # Determine the state of denoisers *as they will be* after this change
     is_now_before_enabled = old_before_enabled # Default to old state
