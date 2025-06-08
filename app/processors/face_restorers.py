@@ -214,11 +214,7 @@ class FaceRestorers:
             print("\n".join(error_messages))
             return
         
-        # Ensure kv_tensor_map is not None if use_reference_exclusive_path_globally_tensor is True
-        if use_reference_exclusive_path_globally_tensor.item() and kv_tensor_map is None:
-            print("Error in run_ref_ldm_unet: Exclusive K/V path is ON, but kv_tensor_map is None. This should be caught earlier. Skipping.")
-            return # Or handle error appropriately, e.g., fill output_unet_tensor with zeros
-
+        # The caller (apply_denoiser_unet) should ensure that if use_reference_exclusive_path_globally_tensor is True, kv_tensor_map is not None.
         # Output name is fixed as 'unet_output' based on the provided spec
         onnx_output_name = "unet_output"
 
@@ -232,9 +228,18 @@ class FaceRestorers:
         io_binding.bind_input(name='is_ref_flag_input', device_type=bind_device_type, device_id=bind_device_id, element_type=np.bool_, shape=tuple(is_ref_flag_tensor.shape), buffer_ptr=is_ref_flag_tensor.data_ptr())
         io_binding.bind_input(name='use_reference_exclusive_path_globally_input', device_type=bind_device_type, device_id=bind_device_id, element_type=np.bool_, shape=tuple(use_reference_exclusive_path_globally_tensor.shape), buffer_ptr=use_reference_exclusive_path_globally_tensor.data_ptr())
 
-        # Bind K/V tensors only if kv_tensor_map is provided
-        if kv_tensor_map:
-            onnx_input_names = [inp.name for inp in ort_session.get_inputs()] # Get names once
+
+        onnx_model_inputs = ort_session.get_inputs()
+        # Get all expected K/V input names and their shapes from the ONNX model
+        onnx_kv_input_names_to_shape: Dict[str, tuple] = {
+            inp.name: tuple(dim if isinstance(dim, int) and dim > 0 else 1 for dim in inp.shape)
+            for inp in onnx_model_inputs
+            if inp.name.endswith("_k_ext") or inp.name.endswith("_v_ext")
+        }
+
+        # Prepare a dictionary to hold actual K/V tensors from the loaded file, if any
+        actual_kv_tensors_for_binding: Dict[str, torch.Tensor] = {}
+        if kv_tensor_map:  # A K/V file is loaded and its map is available
             for pt_module_name, kv_pair in kv_tensor_map.items():
                 onnx_base_name = pt_module_name.replace('.', '_')
                 k_name_onnx = f"{onnx_base_name}_k_ext"
@@ -243,19 +248,28 @@ class FaceRestorers:
                 k_tensor_original = kv_pair.get('k')
                 v_tensor_original = kv_pair.get('v')
 
-                if k_tensor_original is not None and k_name_onnx in onnx_input_names:
-                    k_tensor_batched = k_tensor_original.unsqueeze(0).to(device=bind_device_type, dtype=torch.float32).contiguous()
-                    io_binding.bind_input(name=k_name_onnx, device_type=bind_device_type, device_id=bind_device_id, element_type=np.float32, shape=tuple(k_tensor_batched.shape), buffer_ptr=k_tensor_batched.data_ptr())
-                # No warning if not found, as ONNX model might not use all possible K/V layers if optimized
+                if k_tensor_original is not None and k_name_onnx in onnx_kv_input_names_to_shape:
+                    actual_kv_tensors_for_binding[k_name_onnx] = k_tensor_original.unsqueeze(0).to(device=bind_device_type, dtype=torch.float32).contiguous()
+                
+                if v_tensor_original is not None and v_name_onnx in onnx_kv_input_names_to_shape:
+                    actual_kv_tensors_for_binding[v_name_onnx] = v_tensor_original.unsqueeze(0).to(device=bind_device_type, dtype=torch.float32).contiguous()
 
-                if v_tensor_original is not None and v_name_onnx in onnx_input_names:
-                    v_tensor_batched = v_tensor_original.unsqueeze(0).to(device=bind_device_type, dtype=torch.float32).contiguous()
-                    io_binding.bind_input(name=v_name_onnx, device_type=bind_device_type, device_id=bind_device_id, element_type=np.float32, shape=tuple(v_tensor_batched.shape), buffer_ptr=v_tensor_batched.data_ptr())
-        elif not kv_tensor_map and use_reference_exclusive_path_globally_tensor.item():
-             # This case should ideally be prevented by the caller (apply_denoiser_unet)
-             print(f"Warning/Error in run_ref_ldm_unet: kv_tensor_map is None but use_reference_exclusive_path_globally is True. UNet might fail or produce unexpected results if K/V inputs are not optional in ONNX graph.")
-             # Depending on ONNX model, this might error out if K/V inputs are not optional.
-             # If they are optional (e.g. can be None), this might be fine. Assuming they are required.
+        # Bind all expected K/V inputs: use actual tensor if available, otherwise use a dummy tensor.
+        for onnx_kv_name, expected_shape in onnx_kv_input_names_to_shape.items():
+            tensor_to_bind = actual_kv_tensors_for_binding.get(onnx_kv_name)
+
+            if tensor_to_bind is None:  # No actual tensor found for this input, use a dummy.
+                # The shape for the dummy tensor is `expected_shape` derived from the model's input definition.
+                tensor_to_bind = torch.zeros(expected_shape, dtype=torch.float32, device=bind_device_type).contiguous()
+            
+            io_binding.bind_input(
+                name=onnx_kv_name,
+                device_type=bind_device_type,
+                device_id=bind_device_id,
+                element_type=np.float32,
+                shape=tuple(tensor_to_bind.shape), # Use the shape of the tensor being bound
+                buffer_ptr=tensor_to_bind.data_ptr()
+            )
 
         # Bind output
         io_binding.bind_output(name=onnx_output_name, device_type=bind_device_type, device_id=bind_device_id, element_type=np.float32, shape=tuple(output_unet_tensor.shape), buffer_ptr=output_unet_tensor.data_ptr())

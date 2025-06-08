@@ -728,7 +728,11 @@ class ModelsProcessor(QtCore.QObject):
         
         final_denoised_latent_x0_scaled = None 
         should_use_kv_in_unet = use_reference_exclusive_path and (kv_tensor_map_for_this_run is not None)
-        is_ref_flag_tensor_for_unet = torch.tensor([False], dtype=torch.bool, device=self.device).contiguous()
+        # Both flags are now controlled by the 'use_reference_exclusive_path' UI toggle.
+        # is_ref_flag_input: Tells the UNet it's operating in a mode that might involve external K/V (like encoding a reference or using one exclusively).
+        # use_reference_exclusive_path_globally_input: Specifically tells the UNet it MUST use external K/V if provided.
+        is_ref_flag_tensor_for_unet = torch.tensor([use_reference_exclusive_path], dtype=torch.bool, device=self.device).contiguous()
+        actual_use_exclusive_path_tensor_for_unet = torch.tensor([use_reference_exclusive_path], dtype=torch.bool, device=self.device).contiguous()
 
         if denoiser_mode == "Single Step (Fast)":
             torch.manual_seed(base_seed + denoiser_single_step_t) 
@@ -740,15 +744,14 @@ class ModelsProcessor(QtCore.QObject):
             xt_noisy_scaled_8_channel = lq_latent_x0_scaled_for_unet * sqrt_alpha_bar_t_torch + noise_sample * sqrt_one_minus_alpha_bar_t_torch
             unet_input_16_channel = torch.cat((xt_noisy_scaled_8_channel, lq_latent_x0_scaled_for_unet), dim=1)
             timesteps_tensor_unet = torch.tensor([current_t_idx], dtype=torch.int64, device=self.device)
-            predicted_noise_from_unet = torch.empty((1, 8, latent_h, latent_w), dtype=torch.float32, device=self.device).contiguous()
-            use_kv_path_tensor_for_single_step = torch.tensor([should_use_kv_in_unet], dtype=torch.bool, device=self.device).contiguous()
+            predicted_noise_from_unet = torch.empty((1, 8, latent_h, latent_w), dtype=torch.float32, device=self.device).contiguous()            
 
             self.face_restorers.run_ref_ldm_unet(
                 x_noisy_plus_lq_latent=unet_input_16_channel,
                 timesteps_tensor=timesteps_tensor_unet,
                 is_ref_flag_tensor=is_ref_flag_tensor_for_unet,
-                use_reference_exclusive_path_globally_tensor=use_kv_path_tensor_for_single_step,
-                kv_tensor_map=kv_tensor_map_for_this_run if should_use_kv_in_unet else None,
+                use_reference_exclusive_path_globally_tensor=actual_use_exclusive_path_tensor_for_unet,
+                kv_tensor_map=kv_tensor_map_for_this_run, # Pass directly, can be None
                 output_unet_tensor=predicted_noise_from_unet
             )
             final_denoised_latent_x0_scaled = (xt_noisy_scaled_8_channel - sqrt_one_minus_alpha_bar_t_torch * predicted_noise_from_unet) / sqrt_alpha_bar_t_torch
@@ -785,27 +788,26 @@ class ModelsProcessor(QtCore.QObject):
                 ts_unet = torch.full((1,), step_ddpm_idx, device=self.device, dtype=torch.int64)
                 unet_input_cond = torch.cat([current_latent_xt_scaled, lq_latent_x0_scaled_for_unet], dim=1)
                 e_t_cond = torch.empty_like(lq_latent_x0_scaled_for_unet)
-                use_kv_path_tensor_cond = torch.tensor([should_use_kv_in_unet], dtype=torch.bool, device=self.device).contiguous()
                 
                 self.face_restorers.run_ref_ldm_unet(
                     x_noisy_plus_lq_latent=unet_input_cond,
                     timesteps_tensor=ts_unet,
                     is_ref_flag_tensor=is_ref_flag_tensor_for_unet,
-                    use_reference_exclusive_path_globally_tensor=use_kv_path_tensor_cond,
-                    kv_tensor_map=kv_tensor_map_for_this_run if should_use_kv_in_unet else None,
+                    use_reference_exclusive_path_globally_tensor=actual_use_exclusive_path_tensor_for_unet,
+                    kv_tensor_map=kv_tensor_map_for_this_run, # Pass directly, can be None
                     output_unet_tensor=e_t_cond
                 )
                 e_t = e_t_cond
 
                 if denoiser_cfg_scale != 1.0:
                     unet_input_uncond = torch.cat([current_latent_xt_scaled, lq_latent_x0_scaled_for_unet], dim=1)
-                    e_t_uncond = torch.empty_like(lq_latent_x0_scaled_for_unet)
-                    use_kv_path_tensor_uncond = torch.tensor([False], dtype=torch.bool, device=self.device).contiguous()
+                    e_t_uncond = torch.empty_like(lq_latent_x0_scaled_for_unet)                    
+                    # For uncond path, exclusive_path_globally is effectively False, and no K/V map is used.
                     self.face_restorers.run_ref_ldm_unet(
                         x_noisy_plus_lq_latent=unet_input_uncond,
                         timesteps_tensor=ts_unet,
                         is_ref_flag_tensor=is_ref_flag_tensor_for_unet,
-                        use_reference_exclusive_path_globally_tensor=use_kv_path_tensor_uncond, 
+                        use_reference_exclusive_path_globally_tensor=torch.tensor([False], dtype=torch.bool, device=self.device).contiguous(), 
                         kv_tensor_map=None, 
                         output_unet_tensor=e_t_uncond
                     )
