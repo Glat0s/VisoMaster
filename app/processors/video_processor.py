@@ -66,6 +66,13 @@ class VideoProcessor(QObject):
         self.frame_read_timer = QTimer()
         self.frame_read_timer.timeout.connect(self.process_next_frame)
 
+        # Source video color characteristics (default to SDR)
+        self.source_color_trc = 'bt709'
+        self.source_color_primaries = 'bt709'
+        self.source_color_space = 'bt709'
+        self.source_pix_fmt = 'yuv420p' # Default SDR 8-bit
+        self.source_bit_depth = 8       # Default SDR 8-bit
+
         self.next_frame_to_display = 0
         self.frame_processed_signal.connect(self.store_frame_to_display)
         self.frame_display_timer = QTimer()
@@ -413,6 +420,9 @@ class VideoProcessor(QObject):
         frame_height, frame_width, _ = self.current_frame.shape
 
         self.temp_file = r'temp_output.mp4'
+        # Ensure temp_file is unique if multiple instances could run, though typically not an issue here.
+        # self.temp_file = f'temp_output_{os.getpid()}.mp4' 
+
         if Path(self.temp_file).is_file():
             os.remove(self.temp_file)
 
@@ -431,6 +441,12 @@ class VideoProcessor(QObject):
             # self.temp_file                # Output file
         # ]
 
+        # Consistently output SDR BT.709 as the Python pipeline produces 8-bit SDR frames.
+        output_pix_fmt = 'yuv420p' # Standard 8-bit SDR
+        output_color_trc = 'bt709'
+        output_colorspace = 'bt709'
+        output_color_primaries = 'bt709'
+
         args = [
             "ffmpeg",
             "-hide_banner",
@@ -443,13 +459,17 @@ class VideoProcessor(QObject):
             "-r", str(self.fps),
             "-i", "pipe:",
 
-            # Video Filtergraph:
-            # 1. Upload BGR frame from CPU to GPU memory
-            # 2. Convert color format on GPU (NVENC often prefers nv12 or p010le for 10-bit)
-            #    For 8-bit YUV 4:2:0, nv12 is common.
-            # Note: The 'format=' filter after hwupload runs on the GPU.
-            "-vf", "format=pix_fmts=nv12,hwupload_cuda",
+            # Video Filtergraph
+            # The bgr24 input from pipe will be converted by ffmpeg.
+            # For NVENC, it needs a GPU compatible format like nv12 (8-bit) or p010le (10-bit).
+            # The `format` filter handles CPU-side conversion before hwupload.
+        ]
+        # Since input to pipe is 8-bit bgr24, always use nv12 for NVENC.
+        if self.main_window.control.get('ProvidersPrioritySelection') in ["CUDA", "TensorRT", "TensorRT-Engine"]:
+            args.extend(["-vf", "format=pix_fmts=nv12,hwupload_cuda"])
+        # If CPU, no hwupload needed, ffmpeg handles conversion to output_pix_fmt directly.
 
+        args.extend([
             # Video Codec: Use NVIDIA HEVC encoder
             "-c:v", "hevc_nvenc",
             # Quality Setting: NVENC uses -cq (Constant Quality scale, lower=better, ~18-28 is common range)
@@ -462,11 +482,12 @@ class VideoProcessor(QObject):
             # Profile/Level might still be useful
             # "-profile:v", "main",
             # "-level:v", "6.2",
-            # Set color properties (NVENC should respect these)
+            # Set output color properties
+            "-pix_fmt", output_pix_fmt, # Explicitly set output pixel format for the container
             "-color_range", "tv",
-            "-colorspace", "bt709",
-            "-color_primaries", "bt709",
-            "-color_trc", "smpte2084",
+            "-colorspace", output_colorspace,
+            "-color_primaries", output_color_primaries,
+            "-color_trc", output_color_trc,
             "-tag:v", "hvc1",
 
             # Audio Codec: Copy directly
@@ -474,9 +495,7 @@ class VideoProcessor(QObject):
 
             # Output File
             self.temp_file
-        ]
-
-
+        ])
 
 
         self.recording_sp = subprocess.Popen(args, stdin=subprocess.PIPE)

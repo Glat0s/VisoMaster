@@ -50,12 +50,16 @@ onnxruntime.set_default_logger_severity(4)
 onnxruntime.log_verbosity_level = -1 # type: ignore
 lock = threading.Lock()
 
-def gamma_encode_linear_rgb_to_srgb(linear_rgb: torch.Tensor, gamma=1.0):
+SRGB_GAMMA = 2.2 # More precise sRGB gamma handling is complex, this is an approximation
+
+def gamma_encode_linear_rgb_to_srgb(linear_rgb: torch.Tensor, gamma=SRGB_GAMMA):
     # Assumes input is float in [0,1], linear RGB
+    # linear_rgb -> srgb
     return torch.pow(linear_rgb.clamp(0.0, 1.0), 1.0 / gamma)
 
-def gamma_decode_srgb_to_linear_rgb(srgb: torch.Tensor, gamma=1.0):
+def gamma_decode_srgb_to_linear_rgb(srgb: torch.Tensor, gamma=SRGB_GAMMA):
     # Assumes input is float in [0,1], sRGB
+    # srgb -> linear_rgb
     return torch.pow(srgb.clamp(0.0, 1.0), gamma)
 
 
@@ -172,6 +176,7 @@ class ModelsProcessor(QtCore.QObject):
     def __init__(self, main_window: 'MainWindow', device='cuda'):
         super().__init__()
         self.main_window = main_window
+        self.K = K # Assign the module-level K to an instance attribute
         self.provider_name = 'TensorRT'
         self.internal_deep_copied_kv_map: Dict[str, Dict[str, torch.Tensor]] | None = None
         self.internal_kv_map_source_filename: str | None = None
@@ -640,11 +645,11 @@ class ModelsProcessor(QtCore.QObject):
                             denoiser_ddim_steps: int = 20,
                             denoiser_cfg_scale: float = 1.0,
                             denoiser_ddim_eta: float = 0.0,
-                            base_seed: int = 220,
-                            blur_sigma_before_sharpen: float = 0.5,
-                            sharpen_strength: float = 0.5
+                            base_seed: int = 220
+                            #blur_sigma_before_sharpen: float = 0.5,
+                            #sharpen_strength: float = 0.5
                             ) -> torch.Tensor:
-
+        # This flag is already defined in the original file.
         DEBUG_DENOISER = False
         unet_model_name = self.main_window.fixed_unet_model_name
         vae_encoder_name = 'RefLDMVAEEncoder'
@@ -705,28 +710,27 @@ class ModelsProcessor(QtCore.QObject):
                                                      antialias=True)(image_cxhxw_uint8)
         else:
             image_to_process_cxhxw_uint8 = image_cxhxw_uint8
+
         h_proc, w_proc = image_to_process_cxhxw_uint8.shape[1], image_to_process_cxhxw_uint8.shape[2]
 
-        # Normalize image to [-1, 1] for VAE Encoder (input is sRGB uint8)
-        # VAE Encoder Input: sRGB float [-1,1]
+        # --- VAE Encoder Input Preparation ---
+        # Convert sRGB uint8 [0,255] to sRGB float [-1,1] for VAE Encoder
+        # This assumes the VAE expects sRGB-like data normalized to [-1,1].
         image_srgb_float_minus1_1 = (image_to_process_cxhxw_uint8.float() / 127.5) - 1.0
         image_srgb_float_minus1_1_batched = image_srgb_float_minus1_1.unsqueeze(0).contiguous()
-        #if DEBUG_DENOISER: ModelsProcessor.print_tensor_stats(image_srgb_float_minus1_1_batched, "VAE Encoder Input: sRGB [-1,1] (Batched)", DEBUG_DENOISER)
         
         latent_h, latent_w = h_proc // 8, w_proc // 8
         encoded_latent_direct_vae_out_bchw = torch.empty((1, 8, latent_h, latent_w), dtype=torch.float32, device=self.device).contiguous()
+        # Pass the sRGB [-1,1] tensor to the VAE encoder
         self.face_restorers.run_vae_encoder(image_srgb_float_minus1_1_batched, encoded_latent_direct_vae_out_bchw)
-        #if DEBUG_DENOISER: ModelsProcessor.print_tensor_stats(encoded_latent_direct_vae_out_bchw, "Post VAE Encode: z_unscaled (raw VAE output)", DEBUG_DENOISER)
 
         lq_latent_x0_scaled_for_unet = encoded_latent_direct_vae_out_bchw * self.vae_scale_factor # self.vae_scale_factor is 1.0
-        #if DEBUG_DENOISER: ModelsProcessor.print_tensor_stats(lq_latent_x0_scaled_for_unet, f"LQ Latent for UNet (z_scaled, export_scale_factor_effect=1.0)", DEBUG_DENOISER)
         
         final_denoised_latent_x0_scaled = None 
         should_use_kv_in_unet = use_reference_exclusive_path and (kv_tensor_map_for_this_run is not None)
         is_ref_flag_tensor_for_unet = torch.tensor([False], dtype=torch.bool, device=self.device).contiguous()
 
         if denoiser_mode == "Single Step (Fast)":
-            #if DEBUG_DENOISER: print(f"ModelsProcessor: Running Single Step Denoising at t={denoiser_single_step_t}.")
             torch.manual_seed(base_seed + denoiser_single_step_t) 
             noise_sample = torch.randn_like(lq_latent_x0_scaled_for_unet)
             current_t_idx = min(max(0, denoiser_single_step_t), len(self.alphas_cumprod_np) - 1)
@@ -748,10 +752,8 @@ class ModelsProcessor(QtCore.QObject):
                 output_unet_tensor=predicted_noise_from_unet
             )
             final_denoised_latent_x0_scaled = (xt_noisy_scaled_8_channel - sqrt_one_minus_alpha_bar_t_torch * predicted_noise_from_unet) / sqrt_alpha_bar_t_torch
-            #if DEBUG_DENOISER: ModelsProcessor.print_tensor_stats(final_denoised_latent_x0_scaled, "SingleStep: Final Denoised Latent (pred_x0_scaled)", DEBUG_DENOISER)
 
         elif denoiser_mode == "Full Restore (DDIM)":
-            #if DEBUG_DENOISER: print(f"ModelsProcessor: Running Full Restore with DDIM steps={denoiser_ddim_steps}, CFG={denoiser_cfg_scale}, Schedule: uniform_trailing, Eta={denoiser_ddim_eta}.")
             
             torch.manual_seed(base_seed) # Seed once before the loop for initial x_T and subsequent noise in DDIM step
             
@@ -773,7 +775,6 @@ class ModelsProcessor(QtCore.QObject):
             ddim_alphas_prev = torch.from_numpy(_ddim_alphas_prev_np).float().to(self.device)
             ddim_sqrt_one_minus_alphas = torch.sqrt(torch.clamp(1. - ddim_alphas, min=0.0))
             current_latent_xt_scaled = torch.randn_like(lq_latent_x0_scaled_for_unet)
-            #if DEBUG_DENOISER: ModelsProcessor.print_tensor_stats(current_latent_xt_scaled, "DDIM: Initial x_T", DEBUG_DENOISER)
 
             time_range_ddpm_indices = np.flip(_ddim_raw_ddpm_timesteps_np)
             total_steps = len(time_range_ddpm_indices)
@@ -821,35 +822,37 @@ class ModelsProcessor(QtCore.QObject):
                 noise_ddim = sigma_t * torch.randn_like(current_latent_xt_scaled)
                 current_latent_xt_scaled = torch.sqrt(a_prev) * pred_x0_scaled_current_step + dir_xt + noise_ddim
             final_denoised_latent_x0_scaled = pred_x0_scaled_current_step
-            #if DEBUG_DENOISER: ModelsProcessor.print_tensor_stats(final_denoised_latent_x0_scaled, "DDIM: Final Denoised Latent (pred_x0_scaled)", DEBUG_DENOISER)
         
         else: 
             print(f"Denoiser: Unknown mode '{denoiser_mode}'. Skipping denoiser pass.")
             return image_cxhxw_uint8
 
         if final_denoised_latent_x0_scaled is None:
-            #if DEBUG_DENOISER: print("Denoiser: final_denoised_latent_x0_scaled is None, returning original image.")
             return image_cxhxw_uint8
 
-        latent_for_vae_decoder =     final_denoised_latent_x0_scaled / self.vae_scale_factor
+        latent_for_vae_decoder = final_denoised_latent_x0_scaled / self.vae_scale_factor
         decoded_image_normalized_bchw = torch.empty((1, 3, h_proc, w_proc), dtype=torch.float32, device=self.device).contiguous()
+        
+        # Run VAE Decoder
         self.face_restorers.run_vae_decoder(latent_for_vae_decoder, decoded_image_normalized_bchw)
         
-        decoded_image_srgb_float_0_1_squeezed = torch.clamp((decoded_image_normalized_bchw.squeeze(0) + 1.0) / 2.0, 0.0, 1.0)
-        ModelsProcessor.print_tensor_stats(decoded_image_srgb_float_0_1_squeezed, "VAE Decoded: sRGB [0,1] (Clamped)", DEBUG_DENOISER)
-        
-        image_after_postproc_float_0_1 = decoded_image_srgb_float_0_1_squeezed
+        # --- VAE Decoder Output Post-processing ---
+        # Apply tanh to softly map the VAE output to strictly [-1, 1] range.
+        # This helps prevent hard clipping if the VAE overshoots its nominal range.
+        decoded_image_soft_clamped_bchw = torch.tanh(decoded_image_normalized_bchw)
 
-        #if DEBUG_DENOISER: ModelsProcessor.print_tensor_stats(image_after_postproc_float_0_1, "VAE Decoded: sRGB [0,1] (Clamped from sRGB [-1,1])", DEBUG_DENOISER)
+        # Convert sRGB float [-1,1] to sRGB float [0,1].
+        # A final clamp to [0,1] is good practice for safety, though tanh helps.
+        image_after_postproc_float_0_1 = (decoded_image_soft_clamped_bchw.squeeze(0) + 1.0) / 2.0
+        image_after_postproc_float_0_1 = torch.clamp(image_after_postproc_float_0_1, 0.0, 1.0)
+
         
         final_image_uint8 = (image_after_postproc_float_0_1 * 255.0).byte()
-        #if DEBUG_DENOISER: ModelsProcessor.print_tensor_stats(final_image_uint8, "Final PostProcessed sRGB [0,255] uint8", DEBUG_DENOISER)
 
         if h_proc != h_input or w_proc != w_input:
             output_image_cxhxw_uint8 = v2.Resize((h_input, w_input),
                                                 interpolation=v2.InterpolationMode.BILINEAR,
                                                 antialias=True)(final_image_uint8)
-            #if DEBUG_DENOISER: ModelsProcessor.print_tensor_stats(output_image_cxhxw_uint8, "Final Output sRGB [0,255] uint8 (resized to input_dim)", DEBUG_DENOISER)
         else:
             output_image_cxhxw_uint8 = final_image_uint8
 

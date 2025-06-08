@@ -15,12 +15,26 @@ import numpy as np
 from app.processors.utils import faceutil
 import app.ui.widgets.actions.common_actions as common_widget_actions # Used in original
 from app.ui.widgets.actions import video_control_actions # Used in original
+from app.processors.models_processor import ModelsProcessor # Import ModelsProcessor
 from app.helpers.miscellaneous import t512,t384,t256,t128, ParametersDict
 from app.processors.models_data import models_dir # For UNet model existence check
 from app.helpers.vr_utils import EquirectangularConverter, PerspectiveConverter # For VR180
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
+
+# These are simplified gamma functions. For more accurate conversions,
+# Kornia (K.rgb_to_linear_rgb, K.linear_rgb_to_rgb) should be preferred
+# and accessed via self.models_processor.K if available.
+FW_SRGB_GAMMA = 2.2 # Standard sRGB gamma approximation
+
+def fw_gamma_encode_linear_to_srgb(linear_rgb_tensor: torch.Tensor, gamma: float = FW_SRGB_GAMMA) -> torch.Tensor:
+    """Converts a linear RGB tensor [0,1] to sRGB tensor [0,1]."""
+    return torch.pow(linear_rgb_tensor.clamp(0.0, 1.0), 1.0 / gamma)
+
+# def fw_gamma_decode_srgb_to_linear(srgb_tensor: torch.Tensor, gamma: float = FW_SRGB_GAMMA) -> torch.Tensor:
+#     """Converts an sRGB tensor [0,1] to linear RGB tensor [0,1]."""
+#     return torch.pow(srgb_tensor.clamp(0.0, 1.0), gamma)
 
 torchvision.disable_beta_transforms_warning()
 
@@ -414,6 +428,8 @@ class FrameWorker(threading.Thread):
                     'tensor_rgb_uint8': processed_crop_for_stitching, # Corrected value: use the (potentially) processed crop
                     'theta': item_data['theta'],
                     'phi': item_data['phi'],
+                    # 'original_eye_side': item_data['original_eye_side'], # For debug
+                    # 'kps_on_crop': item_data['kps_on_crop'], # For debug
                     'fov_used_for_crop': item_data['fov_used_for_crop'] # Pass the dynamic FOV
                 }
 
@@ -989,10 +1005,10 @@ class FrameWorker(threading.Thread):
         # Fallback if latent is problematic (already checked by caller, but as a safeguard)
         if latent is not None and isinstance(latent, torch.Tensor) and (torch.isnan(latent).any() or torch.isinf(latent).any()):
             # Fallback: return original face (resized to 512x512 uint8) and the input affine face as prev_face
-            swapped_512_uint8 = t512( (input_face_affined_hwc_float.permute(2,0,1) * 255.0).byte() )
+            # input_face_affined_hwc_float is sRGB [0,1] (derived from original_face_..._uint8)
+            swapped_512_uint8 = (torch.clamp(t512(input_face_affined_hwc_float.permute(2,0,1)) * 255.0, 0, 255)).byte()
             return swapped_512_uint8, input_face_affined_hwc_float.clone()
 
-        prev_face_hwc_float_for_strength_blend = input_face_affined_hwc_float.clone() # For strength blend
         current_iter_face_hwc_float = input_face_affined_hwc_float.clone() # For iterative swapping
 
         # This will hold the output of the swapper model in its native resolution, float [0,1] RGB
@@ -1000,6 +1016,11 @@ class FrameWorker(threading.Thread):
 
         # --- Model-specific swapping logic ---
         # Each block should update swapped_face_native_res_cxhxw_float and prev_face_hwc_float_for_strength_blend
+        # IMPORTANT ASSUMPTION: All swapper models (Inswapper, ISS, SimSwap, Ghost, CSCS)
+        # output LINEAR RGB in the range [0,1] or [-1,1] which is then normalized to [0,1].
+        # DFM is an exception, it outputs uint8 sRGB.
+        # prev_face_hwc_float_for_strength_blend will be sRGB [0,1] because input_face_affined_hwc_float is sRGB [0,1]
+
         
         current_input_cxhxw_float = current_iter_face_hwc_float.permute(2,0,1) # CxHxW, [0,1]
 
@@ -1028,7 +1049,9 @@ class FrameWorker(threading.Thread):
                     
                     if torch.isnan(output_placeholder_hwc_float).any() or torch.isinf(output_placeholder_hwc_float).any(): break # Error in iteration
                     
-                    prev_face_hwc_float_for_strength_blend = input_face_affined_hwc_float.clone() # Save HWC [0,1]
+                    #prev_face_hwc_float_for_strength_blend = input_face_affined_hwc_float.clone() # Save HWC [0,1]
+                    # prev_face_hwc_float_for_strength_blend is not updated here, it's taken from initial input_face_affined_hwc_float
+                    # which is sRGB. The iterative input_face_affined_hwc_float becomes linear after first swap.
 
                     input_face_affined_hwc_float = output_placeholder_hwc_float.clone() # Update for next iteration HWC [0,1]
             
@@ -1046,7 +1069,7 @@ class FrameWorker(threading.Thread):
                     if torch.isnan(model_raw_output_cxhxw_float_0_1).any() or torch.isinf(model_raw_output_cxhxw_float_0_1).any():
                         break
                         
-                    prev_face_hwc_float_for_strength_blend = current_iter_face_hwc_float.clone()
+                    #prev_face_hwc_float_for_strength_blend = current_iter_face_hwc_float.clone()
                     current_iter_face_hwc_float = model_raw_output_cxhxw_float_0_1.permute(1,2,0) # Already [0,1] HWC
                     current_input_cxhxw_float = current_iter_face_hwc_float.permute(2,0,1)
                     swapped_face_native_res_cxhxw_float = current_input_cxhxw_float
@@ -1062,7 +1085,7 @@ class FrameWorker(threading.Thread):
                     if torch.isnan(model_raw_output_cxhxw_float_0_1).any() or torch.isinf(model_raw_output_cxhxw_float_0_1).any():
                         break
 
-                    prev_face_hwc_float_for_strength_blend = current_iter_face_hwc_float.clone()
+                    #prev_face_hwc_float_for_strength_blend = current_iter_face_hwc_float.clone()
                     current_iter_face_hwc_float = model_raw_output_cxhxw_float_0_1.permute(1,2,0) # Already [0,1] HWC
                     current_input_cxhxw_float = current_iter_face_hwc_float.permute(2,0,1)
                     swapped_face_native_res_cxhxw_float = current_input_cxhxw_float
@@ -1081,7 +1104,7 @@ class FrameWorker(threading.Thread):
                     
                     model_raw_output_rgb_cxhxw_float_neg1_1 = model_raw_output_bgr_cxhxw_float_neg1_1[[2,1,0], :, :] # BGR to RGB
                     
-                    prev_face_hwc_float_for_strength_blend = current_iter_face_hwc_float.clone()
+                    #prev_face_hwc_float_for_strength_blend = current_iter_face_hwc_float.clone()
                     current_iter_face_hwc_float = ((model_raw_output_rgb_cxhxw_float_neg1_1 + 1.0) / 2.0).permute(1,2,0) # To [0,1] HWC
                     
                     current_input_cxhxw_float = current_iter_face_hwc_float.permute(2,0,1)
@@ -1102,7 +1125,7 @@ class FrameWorker(threading.Thread):
                     
                     model_raw_output_cxhxw_float_0_1 = (model_raw_output_cxhxw_float_neg1_1 * 0.5) + 0.5 # Denormalize to [0,1]
 
-                    prev_face_hwc_float_for_strength_blend = current_iter_face_hwc_float.clone()
+                    #prev_face_hwc_float_for_strength_blend = current_iter_face_hwc_float.clone()
                     current_iter_face_hwc_float = model_raw_output_cxhxw_float_0_1.permute(1,2,0) # To [0,1] HWC
                     current_input_cxhxw_float = current_iter_face_hwc_float.permute(2,0,1)
                     input_normalized_cxhxw_float = (current_input_cxhxw_float - 0.5) / 0.5
@@ -1122,27 +1145,27 @@ class FrameWorker(threading.Thread):
                 if torch.isnan(out_celeb_cxhxw_uint8.float()).any() or torch.isinf(out_celeb_cxhxw_uint8.float()).any():
                      swapped_face_native_res_cxhxw_float = current_input_cxhxw_float # Fallback
                 else:
-                    swapped_face_native_res_cxhxw_float = out_celeb_cxhxw_uint8.float() / 255.0 # Convert to [0,1] float
-            # For DFM, prev_face for strength blend is less direct if iterations were intended.
-            # Here, we assume itex=1 for DFM or strength blend is handled differently.
-            # prev_face_hwc_float_for_strength_blend remains the initial input_face_affined_hwc_float
+                    # DFM output is sRGB uint8, convert to sRGB float [0,1]
+                    swapped_face_native_res_cxhxw_float = out_celeb_cxhxw_uint8.float() / 255.0
         
-        # Final conversion to 512x512 uint8
+        # prev_face_srgb_hwc_float_for_strength_blend is the initial input_face_affined_hwc_float (sRGB [0,1])
+        # This is used if strength blending is enabled.
+        prev_face_srgb_hwc_float_for_strength_blend = input_face_affined_hwc_float.clone()        
+        
         # Ensure swapped_face_native_res_cxhxw_float is valid before t512
         if torch.isnan(swapped_face_native_res_cxhxw_float).any() or torch.isinf(swapped_face_native_res_cxhxw_float).any():
-            # If error during swap, use the input affine face as the result
-            swapped_face_native_res_cxhxw_float = input_face_affined_hwc_float.permute(2,0,1)
-            # Ensure prev_face is also safe for strength blending if it was corrupted
-            if prev_face_hwc_float_for_strength_blend is None or \
-               torch.isnan(prev_face_hwc_float_for_strength_blend).any() or \
-               torch.isinf(prev_face_hwc_float_for_strength_blend).any():
-                prev_face_hwc_float_for_strength_blend = input_face_affined_hwc_float.clone()
+            # If error during swap, use the input affine face (which is sRGB) as the result
+            # This is already sRGB [0,1] CxHxW because input_face_affined_hwc_float is sRGB HxWxC [0,1]
+            swapped_face_srgb_float_0_1 = input_face_affined_hwc_float.permute(2,0,1) 
+        else:
+            # Assume all swapper outputs (swapped_face_native_res_cxhxw_float), after their normalization to [0,1], are sRGB.
+            swapped_face_srgb_float_0_1 = swapped_face_native_res_cxhxw_float
 
-
-        resized_swapped_face_float_0_1 = t512(swapped_face_native_res_cxhxw_float) # Resize to 512x512
-        swapped_512_cxhxw_uint8 = (torch.clamp(resized_swapped_face_float_0_1 * 255.0, 0, 255)).byte()
+        # Resize to 512x512 and convert to uint8
+        resized_swapped_srgb_float_0_1 = t512(swapped_face_srgb_float_0_1)
+        swapped_srgb_512_cxhxw_uint8 = (torch.clamp(resized_swapped_srgb_float_0_1 * 255.0, 0, 255)).byte()
         
-        return swapped_512_cxhxw_uint8, prev_face_hwc_float_for_strength_blend
+        return swapped_srgb_512_cxhxw_uint8, prev_face_srgb_hwc_float_for_strength_blend
             
     def get_border_mask(self, parameters: dict) -> torch.Tensor:
         # Returns 1x128x128 float tensor mask
@@ -1206,7 +1229,8 @@ class FrameWorker(threading.Thread):
 
         # This will hold the 512x512 swapped face after model processing
         swapped_final_512_cxhxw_uint8 = original_face_512_cxhxw_uint8.clone() # Default to original
-        prev_face_for_strength_blend_hwc_float = None # HxWxC float [0,1]
+        #prev_face_for_strength_blend_hwc_float = None # HxWxC float [0,1]
+        prev_face_srgb_for_strength_blend_hwc_float = None # HxWxC sRGB float [0,1]
 
         # Condition to attempt swap: valid_s_e must exist OR it's DFM mode with a valid instance
         attempt_swap = (valid_s_e is not None) or \
@@ -1247,7 +1271,8 @@ class FrameWorker(threading.Thread):
                 )
                 input_face_affined_hwc_float = (input_face_affined_cxhxw_uint8.float() / 255.0).permute(1,2,0)
 
-                swapped_final_512_cxhxw_uint8, prev_face_for_strength_blend_hwc_float = \
+                #swapped_final_512_cxhxw_uint8, prev_face_for_strength_blend_hwc_float = \
+                swapped_final_512_cxhxw_uint8, prev_face_srgb_for_strength_blend_hwc_float = \
                     self.get_swapped_and_prev_face(
                         output_placeholder_hwc_float, input_face_affined_hwc_float,
                         original_face_512_cxhxw_uint8, # For DFM
@@ -1256,9 +1281,9 @@ class FrameWorker(threading.Thread):
                     )
         
         # --- Post-swapper model processing (strength, restorers, color, etc.) ---
-        if parameters['StrengthEnableToggle'] and prev_face_for_strength_blend_hwc_float is not None and \
-           not (torch.isnan(prev_face_for_strength_blend_hwc_float).any() or torch.isinf(prev_face_for_strength_blend_hwc_float).any()):
-            
+        if parameters['StrengthEnableToggle'] and prev_face_srgb_for_strength_blend_hwc_float is not None and \
+           not (torch.isnan(prev_face_srgb_for_strength_blend_hwc_float).any() or torch.isinf(prev_face_srgb_for_strength_blend_hwc_float).any()):
+        
             itex_for_strength = ceil(parameters['StrengthAmountSlider'] / 100.0)
             itex_for_strength = max(0, itex_for_strength) # Can be 0 if slider is 0
 
@@ -1268,10 +1293,10 @@ class FrameWorker(threading.Thread):
                 alpha = np.mod(parameters['StrengthAmountSlider'], 100) * 0.01
                 if alpha == 0 and parameters['StrengthAmountSlider'] > 0 : alpha = 1.0
 
-                # prev_face_for_strength_blend_hwc_float is HxWxC, [0,1]
+                # prev_face_srgb_for_strength_blend_hwc_float is HxWxC sRGB float [0,1]
                 # Needs to be Cx512x512 uint8 for blending with swapped_final_512_cxhxw_uint8
-                prev_face_cxhxw_float_0_1 = prev_face_for_strength_blend_hwc_float.permute(2,0,1)
-                prev_face_512_cxhxw_uint8_for_blend = (torch.clamp(t512(prev_face_cxhxw_float_0_1) * 255.0, 0, 255)).byte()
+                prev_face_srgb_cxhxw_float_0_1 = prev_face_srgb_for_strength_blend_hwc_float.permute(2,0,1) # sRGB
+                prev_face_512_cxhxw_uint8_for_blend = (torch.clamp(t512(prev_face_srgb_cxhxw_float_0_1) * 255.0, 0, 255)).byte() # sRGB uint8
                 
                 swapped_final_512_cxhxw_uint8 = (
                     swapped_final_512_cxhxw_uint8.float() * alpha +
@@ -1285,13 +1310,14 @@ class FrameWorker(threading.Thread):
         # --- First Denoiser Pass (before restorers) ---
         if control.get('DenoiserUNetEnableBeforeRestorersToggle', False):
             # Ensure K/V is selected, otherwise _apply_denoiser_pass handles it
-            if control.get('ReferenceKVTensorsSelection') and control.get('ReferenceKVTensorsSelection') != "No K/V tensor files found":
+            # _apply_denoiser_pass already checks this, so direct call is fine.
+            # if control.get('ReferenceKVTensorsSelection') and control.get('ReferenceKVTensorsSelection') != "No K/V tensor files found":
                 #print("Applying Denoiser BEFORE restorers...")
-                swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(
-                    swapped_final_512_cxhxw_uint8, control, "Before"
-                )
-            else:
-                print("Denoiser BEFORE restorers: No K/V tensor file selected. Skipping.")
+            swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(
+                swapped_final_512_cxhxw_uint8, control, "Before"
+            )
+            # else:
+                # print("Denoiser BEFORE restorers: No K/V tensor file selected. Skipping.")
 
         # --- Restorers ---
         # Face Expression Restorer (LivePortrait)
@@ -1303,24 +1329,21 @@ class FrameWorker(threading.Thread):
 
         # --- Second Denoiser Pass (after first restorer) ---
         if control.get('DenoiserAfterFirstRestorerToggle', False):
-            if control.get('ReferenceKVTensorsSelection') and control.get('ReferenceKVTensorsSelection') != "No K/V tensor files found":
-                swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(
-                    swapped_final_512_cxhxw_uint8, control, "AfterFirst"
-                )
-            else:
-                print("Denoiser AFTER first restorer: No K/V tensor file selected. Skipping.")
+            # if control.get('ReferenceKVTensorsSelection') and control.get('ReferenceKVTensorsSelection') != "No K/V tensor files found":
+            swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(
+                swapped_final_512_cxhxw_uint8, control, "AfterFirst"
+            )
+            # else:
+                # print("Denoiser AFTER first restorer: No K/V tensor file selected. Skipping.")
 
         if parameters["FaceRestorerEnable2Toggle"]:
             swapped_final_512_cxhxw_uint8 = self.models_processor.apply_facerestorer(swapped_final_512_cxhxw_uint8, parameters['FaceRestorerDetType2Selection'], parameters['FaceRestorerType2Selection'], parameters["FaceRestorerBlend2Slider"], parameters['FaceFidelityWeight2DecimalSlider'], control['DetectorScoreSlider']/100.0)
 
         # --- Third Denoiser Pass (after restorers) ---
         if control.get('DenoiserAfterRestorersToggle', False):
-            if control.get('ReferenceKVTensorsSelection') and control.get('ReferenceKVTensorsSelection') != "No K/V tensor files found":
-                swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(
-                    swapped_final_512_cxhxw_uint8, control, "After"
-                )
-            else:
-                print("Denoiser AFTER restorers: No K/V tensor file selected. Skipping.")
+            swapped_final_512_cxhxw_uint8 = self._apply_denoiser_pass(
+                swapped_final_512_cxhxw_uint8, control, "After"
+            )
 
         if parameters["OccluderEnableToggle"]:
             mask = self.models_processor.apply_occlusion(original_face_256_for_masks, parameters["OccluderSizeSlider"])
