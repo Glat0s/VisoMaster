@@ -454,8 +454,8 @@ class VideoProcessor(QObject):
 
             # Input 1: Raw video frames from Python via pipe (CPU memory)
             "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            "-s", f"{frame_width}x{frame_height}",
+            "-pix_fmt", "bgr24", # Pixel format of the data being piped in
+            "-s", f"{frame_width}x{frame_height}", # Resolution of the piped data
             "-r", str(self.fps),
             "-i", "pipe:",
 
@@ -465,12 +465,16 @@ class VideoProcessor(QObject):
             # The `format` filter handles CPU-side conversion before hwupload.
         ]
         # Since input to pipe is 8-bit bgr24, always use nv12 for NVENC.
+        # The filter chain should be: bgr24 (input from pipe) -> format=nv12 (CPU conversion) -> hwupload_cuda -> hevc_nvenc
         if self.main_window.control.get('ProvidersPrioritySelection') in ["CUDA", "TensorRT", "TensorRT-Engine"]:
-            args.extend(["-vf", "format=pix_fmts=nv12,hwupload_cuda"])
-        # If CPU, no hwupload needed, ffmpeg handles conversion to output_pix_fmt directly.
+            # For NVENC, frames must be in GPU memory.
+            # Let hevc_nvenc handle the upload and format conversion by specifying input format.
+            # No explicit -vf for hwupload/format needed if nvenc handles it.
+            pass # hevc_nvenc will use the -pix_fmt bgr24 from input and manage upload/conversion
+        else: # CPU processing for ffmpeg (e.g. libx264)
+            args.extend(["-vf", f"format={output_pix_fmt}"])
 
         args.extend([
-            # Video Codec: Use NVIDIA HEVC encoder
             "-c:v", "hevc_nvenc",
             # Quality Setting: NVENC uses -cq (Constant Quality scale, lower=better, ~18-28 is common range)
             # Or use -qp (Constant Quantization Parameter)
