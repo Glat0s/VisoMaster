@@ -6,32 +6,45 @@ from functools import lru_cache
 
 
 # This function should be at the module level
-@lru_cache(maxsize=None) # Cache based on THETA_deg, PHI_deg, device_str
-def _get_rotation_matrices_cached(THETA_deg: float, PHI_deg: float, device_str: str):
+@lru_cache(maxsize=None) # Cache based on THETA_deg, PHI_deg, ROLL_deg, device_str
+def _get_rotation_matrices_cached(THETA_deg: float, PHI_deg: float, ROLL_deg: float, device_str: str):
     """
-    Calculates and caches rotation matrices.
-    THETA_deg, PHI_deg are in degrees.
+    Calculates and caches inverse rotation matrices for a Yaw, Pitch, Roll sequence.
+    Angles are in degrees.
     device_str is the string representation of the torch device.
     """
     device = torch.device(device_str)
+    x_axis_np = np.array([1.0, 0.0, 0.0], np.float32)
     y_axis_np = np.array([0.0, 1.0, 0.0], np.float32)
     z_axis_np = np.array([0.0, 0.0, 1.0], np.float32)
 
     # Convert degrees to radians for Rodrigues
     theta_rad_val = np.radians(THETA_deg)
     phi_rad_val = np.radians(PHI_deg)
+    roll_rad_val = np.radians(ROLL_deg)
 
+    # 1. Yaw rotation
     R1_np, _ = cv2.Rodrigues(z_axis_np * theta_rad_val)
+    
+    # 2. Pitch rotation axis and matrix
     rotated_y_axis_np = np.dot(R1_np, y_axis_np)
     # PHI is up/down angle. Negative PHI in Rodrigues often means rotating "upwards" from XY plane around the new Y.
     R2_np, _ = cv2.Rodrigues(rotated_y_axis_np * -phi_rad_val)
-
+    
+    # 3. Roll rotation axis and matrix
+    R_yaw_pitch_np = R2_np @ R1_np
+    rotated_x_axis_np = np.dot(R_yaw_pitch_np, x_axis_np) # This is the camera's forward vector
+    R3_np, _ = cv2.Rodrigues(rotated_x_axis_np * roll_rad_val)
+    
+    # The inverse of R_final = R3 @ R2 @ R1 is R1_inv @ R2_inv @ R3_inv
     R1_inv_torch = torch.from_numpy(np.linalg.inv(R1_np)).float().to(device)
     R2_inv_torch = torch.from_numpy(np.linalg.inv(R2_np)).float().to(device)
-    return R1_inv_torch, R2_inv_torch
+    R3_inv_torch = torch.from_numpy(np.linalg.inv(R3_np)).float().to(device)
+    
+    return R1_inv_torch, R2_inv_torch, R3_inv_torch
 
 class Perspective:
-    def __init__(self, img_tensor_cxhxw_rgb_uint8: torch.Tensor, FOV: float, THETA: float, PHI: float):
+    def __init__(self, img_tensor_cxhxw_rgb_uint8: torch.Tensor, FOV: float, THETA: float, PHI: float, ROLL: float = 0.0):
         """
         Initializes with a perspective image tensor.
         :param img_tensor_cxhxw_rgb_uint8: Torch tensor (C, H, W) in RGB, uint8 format, on GPU.
@@ -45,30 +58,33 @@ class Perspective:
         self.device = img_tensor_cxhxw_rgb_uint8.device
         self._channels, self._height, self._width = self._img_tensor_cxhxw_rgb_float.shape
 
-        # Store original THETA, PHI degrees and device string for caching rotation matrices
+        # Store original THETA, PHI, ROLL degrees and device string for caching rotation matrices
         self.THETA_deg_for_cache = THETA
         self.PHI_deg_for_cache = PHI
+        self.ROLL_deg_for_cache = ROLL
         self.device_str_for_cache = str(self.device)
 
-        self._init_params(FOV, THETA, PHI)
+        self._init_params(FOV, THETA, PHI, ROLL)
 
-    def _init_params(self, FOV, THETA, PHI):
+    def _init_params(self, FOV, THETA, PHI, ROLL):
         self.wFOV = FOV
         self.THETA_rad = torch.deg2rad(torch.tensor(THETA, device=self.device, dtype=torch.float32))
         self.PHI_rad = torch.deg2rad(torch.tensor(PHI, device=self.device, dtype=torch.float32))
+        self.ROLL_rad = torch.deg2rad(torch.tensor(ROLL, device=self.device, dtype=torch.float32)) # Added
         self.hFOV = float(self._height) / float(self._width) * FOV
         self.w_len = torch.tan(torch.deg2rad(torch.tensor(self.wFOV / 2.0, device=self.device)))
         self.h_len = torch.tan(torch.deg2rad(torch.tensor(self.hFOV / 2.0, device=self.device)))
 
         # Call the new module-level cached function
-        self.R1, self.R2 = _get_rotation_matrices_cached(
+        self.R1_inv, self.R2_inv, self.R3_inv = _get_rotation_matrices_cached(
             self.THETA_deg_for_cache,
             self.PHI_deg_for_cache,
+            self.ROLL_deg_for_cache,
             self.device_str_for_cache
         )
 
-    def SetParameters(self, FOV, THETA, PHI):
-        self._init_params(FOV, THETA, PHI)
+    def SetParameters(self, FOV, THETA, PHI, ROLL = 0.0):
+        self._init_params(FOV, THETA, PHI, ROLL)
 
     def GetEquirec(self, height: int, width: int) -> tuple[torch.Tensor, torch.Tensor]:
         # Create equirectangular grid
@@ -87,8 +103,8 @@ class Perspective:
 
         # Rotate these 3D points (from equirect space to perspective camera's view space)
         xyz_flat = xyz_equ_norm.reshape(-1, 3).T # (3, H*W)
-        # R1, R2 are inverse rotations from _calc_rotation_matrices
-        rotated_xyz_flat = self.R1 @ self.R2 @ xyz_flat # Order might need R2 @ R1 depending on convention
+        # Apply inverse rotations in reverse order: R_inv = R1_inv @ R2_inv @ R3_inv
+        rotated_xyz_flat = self.R1_inv @ self.R2_inv @ self.R3_inv @ xyz_flat
         rotated_xyz_persp_view = rotated_xyz_flat.T.reshape(height, width, 3) # H, W, 3
 
         # Perspective projection: u = x'/z', v = y'/z'
@@ -121,7 +137,6 @@ class Perspective:
         # grid_sample y: -1 (top) to 1 (bottom)
         
         grid_x_persp = u_norm / self.w_len  # Maps to [-1, 1]
-        #grid_y_persp = v_norm / self.h_len  # Maps to [-1, 1]
         grid_y_persp = - (v_norm / self.h_len)  # Invert Y-axis for grid_sample convention
 
         # Where mask is False, set grid coordinates to something outside [-1,1] to be handled by padding_mode

@@ -22,9 +22,9 @@ class Equirectangular:
         self._channels, self._height, self._width = self._img_tensor_cxhxw_rgb_float.shape
     
 
-    def GetPerspective(self, FOV: float, THETA: float, PHI: float, height: int, width: int) -> torch.Tensor:
+    def GetPerspective(self, FOV: float, THETA: float, PHI: float, height: int, width: int, ROLL: float = 0.0) -> torch.Tensor:
         #
-        # THETA is left/right angle, PHI is up/down angle, both in degree
+        # THETA is left/right angle, PHI is up/down angle, ROLL is tilt angle, all in degree
         #
         # Returns: Perspective crop as Torch tensor (C, H, W) in RGB, uint8 format, on GPU.
 
@@ -53,23 +53,31 @@ class Equirectangular:
         D = torch.sqrt(x_3d**2 + y_3d**2 + z_3d**2)
         xyz_persp_norm = torch.stack((x_3d/D, y_3d/D, z_3d/D), dim=2) # H, W, 3
 
-        # Rotation matrices
+        # --- Generalized Euler Angle Rotation (Yaw, Pitch, Roll) ---
+        x_axis_np = np.array([1.0, 0.0, 0.0], np.float32)
         y_axis_np = np.array([0.0, 1.0, 0.0], np.float32)
         z_axis_np = np.array([0.0, 0.0, 1.0], np.float32)
+        
+        # 1. Yaw around Z-axis
         R1_np, _ = cv2.Rodrigues(z_axis_np * np.radians(THETA))
+        # 2. Pitch around new Y-axis
         R2_np, _ = cv2.Rodrigues(np.dot(R1_np, y_axis_np) * np.radians(-PHI))
-        R1_torch = torch.from_numpy(R1_np).float().to(self.device)
-        R2_torch = torch.from_numpy(R2_np).float().to(self.device)
+        
+        # Combine Yaw and Pitch
+        R_yaw_pitch_np = R2_np @ R1_np
+        
+        # 3. Roll around new X-axis (the camera's forward vector)
+        rotated_x_axis_np = np.dot(R_yaw_pitch_np, x_axis_np)
+        R3_np, _ = cv2.Rodrigues(rotated_x_axis_np * np.radians(ROLL))
+
+        # Final combined rotation
+        R_final_np = R3_np @ R_yaw_pitch_np
+        R_final_torch = torch.from_numpy(R_final_np).float().to(self.device)
 
         # Rotate the 3D points
         # (H, W, 3) -> (H*W, 3) -> (3, H*W) for matmul
         xyz_flat = xyz_persp_norm.reshape(-1, 3).T
-        # Apply rotations: R = R2 @ R1
-        # Rotated_xyz = R @ xyz_persp_norm (if xyz_persp_norm is column vectors)
-        # Here, we transform points from perspective camera space to world space, then to equirectangular.
-        # The original code implies rotations to align the perspective view within the equirectangular sphere.
-        # So, we rotate the perspective rays.
-        rotated_xyz_flat = R2_torch @ R1_torch @ xyz_flat
+        rotated_xyz_flat = R_final_torch @ xyz_flat
         rotated_xyz = rotated_xyz_flat.T.reshape(height, width, 3) # H, W, 3
 
         # Convert Cartesian to spherical coordinates (longitude, latitude)
@@ -101,7 +109,6 @@ class Equirectangular:
 
     def get_height(self):
         return self._height
-        
 
 
 
