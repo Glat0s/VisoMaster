@@ -106,7 +106,12 @@ class TargetMediaCardButton(CardButton):
         layout.addWidget(text_label)
         self.clicked.connect(self.load_media)
         # Imposta lo stylesheet solo per questo pulsante
-
+        self.setStyleSheet("""
+        CardButton:checked {
+            background-color: #555555;
+            border: 2px solid #1abc9c;
+        }
+        """)
 
         # Set the context menu policy to trigger the custom context menu on right-click
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
@@ -118,10 +123,7 @@ class TargetMediaCardButton(CardButton):
         main_window = self.main_window
         # Deselect the currently selected video
         if main_window.selected_video_button:
-            prev_btn = main_window.selected_video_button
-            prev_btn.blockSignals(True)
-            prev_btn.setChecked(False)
-            prev_btn.blockSignals(False)
+            main_window.selected_video_button.toggle()  # Deselect the previous video
             main_window.selected_video_button = False
         
         # Stop the current video processing
@@ -151,10 +153,7 @@ class TargetMediaCardButton(CardButton):
         main_window = self.main_window
         # Deselect the currently selected video
         if main_window.selected_video_button:
-            prev_btn = main_window.selected_video_button
-            prev_btn.blockSignals(True)
-            prev_btn.setChecked(False)
-            prev_btn.blockSignals(False)
+            main_window.selected_video_button.toggle()  # Deselect the previous video
             main_window.selected_video_button = False
         
         # Stop the current video processing
@@ -324,7 +323,10 @@ class TargetMediaCardButton(CardButton):
 class TargetFaceCardButton(CardButton):
     def __init__(self, media_path, cropped_face, embedding_store: Dict[str, np.ndarray], face_id:str, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
+        # if self.main_window.target_faces:
+        #     self.face_id = max([target_face.face_id for target_face in self.main_window.target_faces]) + 1
+        # else:
+        #     self.face_id = 0
         self.face_id = face_id
         self.media_path = media_path
         self.cropped_face = cropped_face
@@ -381,7 +383,9 @@ class TargetFaceCardButton(CardButton):
         
         main_window.selected_target_face_id = self.face_id
 
+        # print('main_window.selected_target_face_id', main_window.selected_target_face_id)     
         common_widget_actions.set_widgets_values_using_face_id_parameters(main_window=main_window, face_id=self.face_id)      
+        # common_widget_actions.refresh_frame(main_window)
 
         main_window.current_widget_parameters = main_window.parameters[self.face_id].copy()
 
@@ -504,6 +508,13 @@ class InputFaceCardButton(CardButton):
         self.setToolTip(media_path)
         self.clicked.connect(self.load_input_face)
 
+        # Imposta lo stylesheet solo per questo pulsante
+        self.setStyleSheet("""
+        CardButton:checked {
+            background-color: #555555;
+            border: 2px solid #1abc9c;
+        }
+        """)
 
         # Set the context menu policy to trigger the custom context menu on right-click
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
@@ -596,7 +607,6 @@ class InputFaceCardButton(CardButton):
         remove_action = QtGui.QAction('Remove from list', self)
         remove_action.triggered.connect(self.remove_input_face_from_list)
         self.popMenu.addAction(remove_action)
-
     def on_context_menu(self, point):
         # show context menu
         self.popMenu.exec_(self.mapToGlobal(point))
@@ -633,6 +643,13 @@ class EmbeddingCardButton(CardButton):
         self.setToolTip(embedding_name)
         self.clicked.connect(self.load_embedding)
 
+        # Imposta lo stylesheet solo per questo pulsante
+        self.setStyleSheet("""
+        CardButton:checked {
+            background-color: #555555;
+            border: 2px solid #1abc9c;
+        }
+        """)
 
         # Set the context menu policy to trigger the custom context menu on right-click
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
@@ -764,6 +781,106 @@ class CreateEmbeddingDialog(QtWidgets.QDialog):
             )
             self.accept()
 
+
+
+class LoadingDialog(QtWidgets.QDialog):
+    def __init__(self, message="Loading Models, please wait...\nDon't panic if it looks stuck!"):
+        super().__init__()
+        self.setWindowTitle("Loading Models")
+        self.setWindowIcon(QtGui.QIcon(u":/media/media/visomaster_small.png"))
+        self.setWindowFlag(QtCore.Qt.WindowCloseButtonHint, False)
+        self.setModal(True)  # Block interaction with other windows
+        self.setFixedSize(225, 125)  # Increased size for better layout
+
+        # Create main layout
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(4, 4, 4, 4)  # Add some padding
+        layout.setSpacing(8)  # Add spacing between elements
+
+        # Icon Label
+        self.icon_label = QtWidgets.QLabel()
+        self.icon_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setPixmap(
+            QtGui.QPixmap(":/media/media/repeat.png").scaled(
+                30, 30, 
+                QtCore.Qt.AspectRatioMode.KeepAspectRatio, 
+                QtCore.Qt.TransformationMode.SmoothTransformation
+            )
+        )
+
+        # Message Label
+        self.label = QtWidgets.QLabel(message)
+        self.label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.label.setWordWrap(True)  # Allow text to wrap within the dialog
+        self.label.setStyleSheet("""
+            font-size: 12px;  /* Set font size */
+            font-weight: bold;  /* Make the text bold */
+        """)
+
+        # Add widgets to layout
+        layout.addWidget(self.icon_label)
+        layout.addWidget(self.label)
+        self.setLayout(layout)
+
+# Custom progress dialog
+class ProgressDialog(QtWidgets.QProgressDialog):
+    pass
+
+class LoadLastWorkspaceDialog(QtWidgets.QDialog):
+    def __init__(self, main_window: 'MainWindow',):
+        super().__init__()
+        self.main_window = main_window
+        self.setWindowTitle("Load Last Workspace")
+        self.setWindowIcon(QtGui.QIcon(u":/media/media/visomaster_small.png"))
+
+        # Create button box
+        QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
+        self.buttonBox.setCenterButtons(True)  # <-- ADD THIS LINE
+        self.buttonBox.accepted.connect(self.load_workspace)
+        self.buttonBox.rejected.connect(self.reject)
+
+        # Create layout and add widgets
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(QtWidgets.QLabel("Do you want to load your last workspace?"))
+        layout.addWidget(self.buttonBox)
+
+        # Set dialog layout
+        self.setLayout(layout)   
+
+    def load_workspace(self):
+        self.accept()
+        save_load_actions.load_saved_workspace(self.main_window, 'last_workspace.json')    
+
+class JobLoadingDialog(QtWidgets.QDialog):
+    def __init__(self, total_steps, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Loading Job Data...")
+        self.setWindowIcon(QtGui.QIcon(u":/media/media/visomaster_small.png"))
+        self.setWindowFlag(QtCore.Qt.WindowCloseButtonHint, False)
+        self.setModal(True)
+        self.setFixedSize(300, 120)
+
+        self.layout = QtWidgets.QVBoxLayout()
+        self.label = QtWidgets.QLabel("Loading job data...")
+        self.label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, total_steps)
+        self.progress_bar.setValue(0)
+        self.step_label = QtWidgets.QLabel("")
+        self.step_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        self.layout.addWidget(self.label)
+        self.layout.addWidget(self.progress_bar)
+        self.layout.addWidget(self.step_label)
+        self.setLayout(self.layout)
+
+    def update_progress(self, current, total, step_name):
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+        self.step_label.setText(f"{step_name} ({current}/{total})")
+        QtWidgets.QApplication.processEvents()
+
 class SaveJobDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -826,74 +943,6 @@ class SaveJobDialog(QtWidgets.QDialog):
             name = self.output_name_edit.text().strip()
             return name if name else None # Return None if empty, job_name will be used
         return None # Return None if checkbox is checked
-
-class LoadingDialog(QtWidgets.QDialog):
-    def __init__(self, message="Loading Models, please wait...\nDon't panic if it looks stuck!"):
-        super().__init__()
-        self.setWindowTitle("Loading Models")
-        self.setWindowIcon(QtGui.QIcon(u":/media/media/visomaster_small.png"))
-        self.setWindowFlag(QtCore.Qt.WindowCloseButtonHint, False)
-        self.setModal(True)  # Block interaction with other windows
-        self.setFixedSize(225, 125)  # Increased size for better layout
-
-        # Create main layout
-        layout = QtWidgets.QVBoxLayout()
-        layout.setContentsMargins(4, 4, 4, 4)  # Add some padding
-        layout.setSpacing(8)  # Add spacing between elements
-
-        # Icon Label
-        self.icon_label = QtWidgets.QLabel()
-        self.icon_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.icon_label.setPixmap(
-            QtGui.QPixmap(":/media/media/repeat.png").scaled(
-                30, 30, 
-                QtCore.Qt.AspectRatioMode.KeepAspectRatio, 
-                QtCore.Qt.TransformationMode.SmoothTransformation
-            )
-        )
-
-        # Message Label
-        self.label = QtWidgets.QLabel(message)
-        self.label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.label.setWordWrap(True)  # Allow text to wrap within the dialog
-        self.label.setStyleSheet("""
-            font-size: 12px;  /* Set font size */
-            font-weight: bold;  /* Make the text bold */
-        """)
-
-        # Add widgets to layout
-        layout.addWidget(self.icon_label)
-        layout.addWidget(self.label)
-        self.setLayout(layout)
-
-# Custom progress dialog
-class ProgressDialog(QtWidgets.QProgressDialog):
-    pass
-
-class LoadLastWorkspaceDialog(QtWidgets.QDialog):
-    def __init__(self, main_window: 'MainWindow',):
-        super().__init__()
-        self.main_window = main_window
-        self.setWindowTitle("Load Last Workspace")
-        self.setWindowIcon(QtGui.QIcon(u":/media/media/visomaster_small.png"))
-
-        # Create button box
-        QBtn = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
-        self.buttonBox = QtWidgets.QDialogButtonBox(QBtn)
-        self.buttonBox.accepted.connect(self.load_workspace)
-        self.buttonBox.rejected.connect(self.reject)
-
-        # Create layout and add widgets
-        layout = QtWidgets.QVBoxLayout()
-        layout.addWidget(QtWidgets.QLabel("Do you want to load your last workspace?"))
-        layout.addWidget(self.buttonBox)
-
-        # Set dialog layout
-        self.setLayout(layout)
-
-    def load_workspace(self):
-        self.accept()
-        save_load_actions.load_saved_workspace(self.main_window, 'last_workspace.json')    
 
 class ParametersWidget:
     def __init__(self, *args, **kwargs):
@@ -1045,6 +1094,10 @@ class ParameterSlider(QtWidgets.QSlider, ParametersWidget):
 
     def reset_to_default_value(self):
         self.setValue(int(self.default_value))
+
+    # def value(self):
+    #     # """Return the slider value as a float, scaled by the decimals."""
+    #     return super().value()
 
     def setValue(self, value):
         """Set the slider value, scaling it from a float to the internal integer."""
@@ -1396,32 +1449,3 @@ class FormGroupBox(QtWidgets.QGroupBox):
         self.main_window = main_window
         self.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Preferred)
         self.setFlat(True)
-
-class JobLoadingDialog(QtWidgets.QDialog):
-    def __init__(self, total_steps, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Loading Job Data...")
-        self.setWindowIcon(QtGui.QIcon(u":/media/media/visomaster_small.png"))
-        self.setWindowFlag(QtCore.Qt.WindowCloseButtonHint, False)
-        self.setModal(True)
-        self.setFixedSize(300, 120)
-
-        self.layout = QtWidgets.QVBoxLayout()
-        self.label = QtWidgets.QLabel("Loading job data...")
-        self.label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.progress_bar = QtWidgets.QProgressBar()
-        self.progress_bar.setRange(0, total_steps)
-        self.progress_bar.setValue(0)
-        self.step_label = QtWidgets.QLabel("")
-        self.step_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-
-        self.layout.addWidget(self.label)
-        self.layout.addWidget(self.progress_bar)
-        self.layout.addWidget(self.step_label)
-        self.setLayout(self.layout)
-
-    def update_progress(self, current, total, step_name):
-        self.progress_bar.setMaximum(total)
-        self.progress_bar.setValue(current)
-        self.step_label.setText(f"{step_name} ({current}/{total})")
-        QtWidgets.QApplication.processEvents()

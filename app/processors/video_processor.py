@@ -8,15 +8,15 @@ import os
 import gc
 from functools import partial
 import tempfile
-import psutil
-import math
 import shutil
 import uuid
 from datetime import datetime # Added from default version for temp file naming
 import cv2
+import psutil
 import numpy
 import torch
 import pyvirtualcam
+import math
 from PySide6.QtCore import QObject, QTimer, Signal, Slot, QEventLoop
 from PySide6.QtGui import QPixmap
 from app.processors.workers.frame_worker import FrameWorker
@@ -24,6 +24,7 @@ from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import layout_actions
+from app.ui.widgets.actions import save_load_actions
 import app.helpers.miscellaneous as misc_helpers
 import warnings
 
@@ -52,8 +53,9 @@ class VideoProcessor(QObject):
         self.threads: Dict[int, threading.Thread] = {}
         self.current_frame: numpy.ndarray = []
         self.virtcam: pyvirtualcam.Camera|None = None
-        self.ffplay_sound_sp = None
         self.recording_sp: subprocess.Popen|None = None # Used by both recording styles
+        
+        self.ffplay_sound_sp = None
 
         # --- Flags and State for Recording Styles ---
         self.recording: bool = False # default style recording flag
@@ -205,19 +207,12 @@ class VideoProcessor(QObject):
         if self.main_window.control['SendVirtCamFramesEnableToggle'] and self.virtcam:
             height, width, _ = frame.shape
             if self.virtcam.height != height or self.virtcam.width != width:
-                print("[INFO] Reinitializing virtual camera due to dimension change.")
                 self.enable_virtualcam() # Re-enable with new dimensions
 
             # Need to check again if virtcam was successfully re-enabled
             if self.virtcam:
                 try:
-                    # Ensure frame is BGR for pyvirtualcam BGR format
-                    if frame.shape[2] == 3: # Basic check for color channels
-                         bgr_frame = frame[...,::-1] # Convert RGB to BGR if needed (assuming internal processing uses RGB)
-                         # If internal processing is already BGR, remove the conversion
-                    else:
-                         bgr_frame = frame # Assume grayscale or other formats are handled correctly downstream
-                    self.virtcam.send(bgr_frame)
+                    self.virtcam.send(frame)
                     self.virtcam.sleep_until_next_frame()
                 except Exception as e:
                     print(f"[WARN] Failed sending frame to virtualcam: {e}")
@@ -283,6 +278,9 @@ class VideoProcessor(QObject):
                 print("[ERROR] Failed to start FFmpeg for default-style recording.")
                 self.stop_processing() # Abort the start
                 return
+        
+        if self.main_window.liveSoundButton.isChecked():
+            self.start_live_sound()
 
         self.start_time = time.perf_counter()
         self.frames_to_display.clear()
@@ -328,8 +326,7 @@ class VideoProcessor(QObject):
                  print("[WARN] Video source reported invalid FPS, using fallback 30.")
                  fps = 30
             self.fps = fps # Store the determined FPS
-        if self.main_window.liveSoundButton.isChecked():
-            self.start_live_sound()
+
         interval = 1000 / fps if fps > 0 else 33 # Default to ~30fps if calculation fails
         # Apply default 80% interval logic for potentially smoother playback/recording frame feeding
         interval = int(interval * 0.8)
@@ -514,6 +511,7 @@ class VideoProcessor(QObject):
         self.frame_read_timer.stop()
         self.frame_display_timer.stop()
         self.gpu_memory_update_timer.stop()
+        self.stop_live_sound()
 
         # Disconnect timer signals to prevent future triggers
         # Need to handle potential TypeErrors if never connected
@@ -528,9 +526,6 @@ class VideoProcessor(QObject):
         self.join_and_clear_threads()
         print("Worker threads joined.")
 
-        #Stoping audio
-        self.stop_live_sound()
-        
         # Clear display queues
         self.frames_to_display.clear()
         self.webcam_frames_to_display.queue.clear()
@@ -609,14 +604,14 @@ class VideoProcessor(QObject):
         try: self.disable_virtualcam()
         except Exception: pass
         print("Processing aborted and cleaned up.")
-        
+
         # Determine the end time based on the frame counter
         # The last frame successfully *processed* (and intended for display) was self.next_frame_to_display - 1
         # The range for audio extraction should go up to the *start* of the frame *after* the last processed one.
         end_frame_for_calc = min(self.next_frame_to_display, self.max_frame_number + 1)
         self.play_end_time = float(end_frame_for_calc / float(self.fps)) if self.fps > 0 else 0.0
         print(f"Calculated default-style recording end time: {self.play_end_time:.3f}s (based on frame {end_frame_for_calc})")
-
+        
         # --- Final Timing and Logging (default style) ---
         self.end_time = time.perf_counter()
         processing_time = self.end_time - self.start_time
@@ -631,9 +626,9 @@ class VideoProcessor(QObject):
                  print("Could not calculate average FPS (duration or processing time is zero).\n")
         except Exception as e:
             print(f"[WARN] Could not calculate average FPS: {e}\n")
-            
+
         return True # Processing was stopped
-        
+
     def join_and_clear_threads(self):
         # print("Joining worker threads...")
         active_threads = list(self.threads.values()) # Copy list as dict may change
@@ -661,6 +656,7 @@ class VideoProcessor(QObject):
              return False
 
         frame_height, frame_width, _ = self.current_frame.shape
+        # Added option to resize video frame to 1920*1080
         frame_height_down = frame_height
         frame_width_down = frame_width
         frame_height_down_mult = frame_height / 1080
@@ -695,77 +691,49 @@ class VideoProcessor(QObject):
             except OSError as e:
                 print(f"[WARN] Could not remove existing temp file {self.temp_file}: {e}")
 
-        args = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-f", "rawvideo",
-            "-pix_fmt", "rgb24", # Use RGB24 since we process in RGB
-            "-s", f"{frame_width}x{frame_height}",
-            "-r", str(self.fps),
-            "-i", "pipe:0", # Read from stdin (pipe:0 is more explicit)
-            # Filter from default version: pad to be divisible by 2, set pixel format for H.264
-            #"-vf", f"pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuvj420p",
-            #"-c:v", "libx264",
-            #"-crf", "18",
-        ]
-        
-        # Consistently output SDR BT.709 as the Python pipeline produces 8-bit SDR frames.
+        # Change color options to keep original video colors
         output_pix_fmt = 'yuvj420p' # Standard 8-bit SDR
         output_color_trc = 'bt2020-10'
         output_colorspace = 'rgb'
         output_color_primaries = 'bt2020'
         
-        if self.main_window.control.get('ProvidersPrioritySelection') in ["CUDA", "TensorRT", "TensorRT-Engine"]:
-            # For NVENC, frames must be in GPU memory.
-            # Let hevc_nvenc handle the upload and format conversion by specifying input format.
-            # No explicit -vf for hwupload/format needed if nvenc handles it.
-            pass # hevc_nvenc will use the -pix_fmt bgr24 from input and manage upload/conversion
-        else: # CPU processing for ffmpeg (e.g. libx264)
-            args.extend(["-vf", f"format={output_pix_fmt}"])
-        
+        args = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-s", f"{frame_width}x{frame_height}",
+            "-r", str(self.fps),
+            "-i", "pipe:0", # Read from stdin (pipe:0 is more explicit)
+        ]
+        # Merged settings from experimental and vr180 patches
         if control['FrameEnhancerDownToggle']:
             args.extend([
-                # Video Codec: Use NVIDIA HEVC encoder
                 "-c:v", "hevc_nvenc",
-                # Quality Setting: NVENC uses -cq (Constant Quality scale, lower=better, ~18-28 is common range)
-                # Or use -qp (Constant Quantization Parameter)
-                # Or target bitrate: -b:v 60M
-                "-cq", "18", # Experiment with this value
-                # Preset: Controls speed vs quality trade-off for NVENC (e.g., p1-p7, default is p4/p5)
-                # p5=medium, p6=slow, p7=slower (higher quality)
-                "-preset", "p6",
-                # Set color properties (NVENC should respect these)
+                "-preset", "p5",
+                "-cq", "18", # Higher quality setting from experimental patch
                 "-vf", f"scale={frame_width_down}x{frame_height_down}:flags=lanczos+accurate_rnd+full_chroma_int",
-                "-pix_fmt", output_pix_fmt, # Explicitly set output pixel format for the container
+                "-pix_fmt", output_pix_fmt,
                 "-colorspace", output_colorspace,
                 "-color_primaries", output_color_primaries,
                 "-color_trc", output_color_trc,
                 "-tag:v", "hvc1",
-                # Output File
                 self.temp_file
             ])
         else:
+            
             args.extend([
-                # Video Codec: Use NVIDIA HEVC encoder
                 "-c:v", "hevc_nvenc",
-                # Quality Setting: NVENC uses -cq (Constant Quality scale, lower=better, ~18-28 is common range)
-                # Or use -qp (Constant Quantization Parameter)
-                # Or target bitrate: -b:v 60M
-                "-cq", "18", # Experiment with this value
-                # Preset: Controls speed vs quality trade-off for NVENC (e.g., p1-p7, default is p4/p5)
-                # p5=medium, p6=slow, p7=slower (higher quality)
-                "-preset", "p6",
-                # Set color properties (NVENC should respect these)
-                "-pix_fmt", output_pix_fmt, # Explicitly set output pixel format for the container
+                "-preset", "p5",
+                "-cq", "18", # Higher quality setting from experimental patch
+                "-pix_fmt", output_pix_fmt,
                 "-colorspace", output_colorspace,
                 "-color_primaries", output_color_primaries,
                 "-color_trc", output_color_trc,
                 "-tag:v", "hvc1",
-                # Output File
                 self.temp_file
             ])
-
         try:
             # bufsize=-1 uses system default, often buffered which might be better for video
             self.recording_sp = subprocess.Popen(args, stdin=subprocess.PIPE, bufsize=-1)
@@ -887,7 +855,7 @@ class VideoProcessor(QObject):
                     "-map", "0:v:0",    # Map video from input 0
                     "-map", "1:a:0?",   # Map audio from input 1 (optional)
                     "-shortest",        # Finish when shortest input ends (should be audio segment)
-                    "-af", "aresample=async=1000",
+                    "-af", "aresample=async=1000", #Audio resample for sync
                     final_file_path]
             try:
                 subprocess.run(args, check=True) # Use check=True to raise error on failure
@@ -938,6 +906,12 @@ class VideoProcessor(QObject):
 
         # --- Reset State and UI ---
         self.recording = False # Ensure recording flag is off
+        
+        if self.main_window.control['AutoSaveWorkspaceToggle']:
+            json_file_path = misc_helpers.get_output_file_path(self.media_path, self.main_window.control['OutputMediaFolder'])      
+            json_file_path += ".json"
+            save_load_actions.save_current_workspace(self.main_window, json_file_path)
+            
         layout_actions.enable_all_parameters_and_control_widget(self.main_window)
         video_control_actions.reset_media_buttons(self.main_window)
 
@@ -1025,14 +999,13 @@ class VideoProcessor(QObject):
             return False
 
         start_frame, end_frame = self.segments_to_process[self.current_segment_index]
-        start_time_sec = float(start_frame / float(self.fps))
+        start_time_sec = start_frame / self.fps
         # Use end_frame + 1 for duration calc if using -t, or end_frame / fps for -to
         # Let's stick to -ss and -to for consistency with default style where applicable
-        #end_time_sec = float(end_frame + 1) / float(self.fps)) # End time is exclusive in -to? No, ffmpeg docs say -to is inclusive. Use end_frame.
-        end_time_sec = float(end_frame / float(self.fps)) # Let's try end_frame directly for -to
-        frame_length = end_frame - start_frame
+        # end_time_sec = (end_frame + 1) / self.fps # End time is exclusive in -to? No, ffmpeg docs say -to is inclusive. Use end_frame.
+        end_time_sec = end_frame / self.fps # Let's try end_frame directly for -to
+
         frame_height, frame_width, _ = self.current_frame.shape
-        
         # Fix for frame enhancer activated while doing segments
         if control['FrameEnhancerEnableToggle']:
             if control['FrameEnhancerTypeSelection'] in ('RealEsrgan-x2-Plus', 'BSRGan-x2'):
@@ -1041,7 +1014,7 @@ class VideoProcessor(QObject):
             elif control['FrameEnhancerTypeSelection'] in ('RealEsrgan-x4-Plus', 'BSRGan-x4', 'UltraSharp-x4', 'UltraMix-x4', 'RealEsr-General-x4v3'):
                 frame_height = frame_height * 4
                 frame_width = frame_width * 4
-        
+        # Added option to resize video frame to 1920*1080
         frame_height_down = frame_height
         frame_width_down = frame_width
         frame_height_down_mult = frame_height / 1080
@@ -1064,14 +1037,18 @@ class VideoProcessor(QObject):
             except OSError as e:
                 print(f"[WARN] Could not remove existing segment file {output_filename}: {e}")
 
-        # Your original args, ensure pix_fmt matches frame data sent (RGB)
+        output_pix_fmt = 'yuvj420p' # Standard 8-bit SDR
+        output_color_trc = 'bt2020-10'
+        output_colorspace = 'rgb'
+        output_color_primaries = 'bt2020'
+        
         args = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "error",
             # Input 0: Processed Video from Pipe (RGB)
             "-f", "rawvideo",
-            "-pix_fmt", "rgb24", # Sending RGB frames
+            "-pix_fmt", "bgr24", # Sending RGB frames
             "-s", f"{frame_width}x{frame_height}",
             "-r", str(self.fps),
             "-i", "pipe:0", # Input 0 from pipe
@@ -1082,28 +1059,12 @@ class VideoProcessor(QObject):
             # Mapping
             "-map", "0:v:0", # Video from pipe
             "-map", "1:a:0?", # Audio from file (optional)
-            # Video Codec & Options (Pad and format for compatibility)
-            #"-vf", f"pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuvj420p",
-            #"-c:v", "libx264",
-            #"-crf", "18",
             # Audio Codec
             "-c:a", "copy", # Copy original audio stream segment
             # Options
             "-shortest", # Stop when shortest input (audio segment) ends
         ]
-        output_pix_fmt = 'yuvj420p' # Standard 8-bit SDR
-        output_color_trc = 'bt2020-10'
-        output_colorspace = 'rgb'
-        output_color_primaries = 'bt2020'
-        
-        if self.main_window.control.get('ProvidersPrioritySelection') in ["CUDA", "TensorRT", "TensorRT-Engine"]:
-            # For NVENC, frames must be in GPU memory.
-            # Let hevc_nvenc handle the upload and format conversion by specifying input format.
-            # No explicit -vf for hwupload/format needed if nvenc handles it.
-            pass # hevc_nvenc will use the -pix_fmt bgr24 from input and manage upload/conversion
-        else: # CPU processing for ffmpeg (e.g. libx264)
-            args.extend(["-vf", f"format={output_pix_fmt}"])
-
+        # Video Codec & Options (Pad and format for compatibility)
         if control['FrameEnhancerDownToggle']:
             args.extend([
                 # Video Codec: Use NVIDIA HEVC encoder
@@ -1114,10 +1075,10 @@ class VideoProcessor(QObject):
                 "-cq", "18", # Experiment with this value
                 # Preset: Controls speed vs quality trade-off for NVENC (e.g., p1-p7, default is p4/p5)
                 # p5=medium, p6=slow, p7=slower (higher quality)
-                "-preset", "p6",
+                "-preset", "p5",
                 # Set color properties (NVENC should respect these)
                 "-vf", f"scale={frame_width_down}x{frame_height_down}:flags=lanczos+accurate_rnd+full_chroma_int",
-                "-pix_fmt", output_pix_fmt, # Explicitly set output pixel format for the container
+                "-pix_fmt", output_pix_fmt,
                 "-colorspace", output_colorspace,
                 "-color_primaries", output_color_primaries,
                 "-color_trc", output_color_trc,
@@ -1135,9 +1096,9 @@ class VideoProcessor(QObject):
                 "-cq", "18", # Experiment with this value
                 # Preset: Controls speed vs quality trade-off for NVENC (e.g., p1-p7, default is p4/p5)
                 # p5=medium, p6=slow, p7=slower (higher quality)
-                "-preset", "p6",
+                "-preset", "p5",
                 # Set color properties (NVENC should respect these)
-                "-pix_fmt", output_pix_fmt, # Explicitly set output pixel format for the container
+                "-pix_fmt", output_pix_fmt,
                 "-colorspace", output_colorspace,
                 "-color_primaries", output_color_primaries,
                 "-color_trc", output_color_trc,
@@ -1230,7 +1191,7 @@ class VideoProcessor(QObject):
             print("[WARN] _start_timers_from_signal called but not in segment processing mode.")
             return
 
-        #print(f"[DEBUG] Starting segment processing timers (from signal) with interval {interval} ms.")
+        print(f"Starting segment processing timers (from signal) with interval {interval} ms.")
 
         # Ensure correct timer connections for segment mode
         try: self.frame_read_timer.timeout.disconnect() # Disconnect any previous
@@ -1525,8 +1486,7 @@ class VideoProcessor(QObject):
                 "-safe", "0", # Allow unsafe paths (though we used absolute)
                 "-i", list_file_path,
                 "-c:v", "copy", # Copy streams directly without re-encoding
-                #"-copyts",
-                "-af", "aresample=async=1000",
+                "-af", "aresample=async=1000", # Audio resample for sync
                 final_file_path
             ]
             subprocess.run(concat_args, check=True) # check=True raises error on failure
@@ -1588,6 +1548,57 @@ class VideoProcessor(QObject):
                 print(f"[WARN] Failed to delete temporary directory {self.segment_temp_dir}: {e}")
         self.segment_temp_dir = None # Reset variable
 
+    def start_live_sound(self):
+        # Start up audio if requested
+        seek_time = (self.next_frame_to_display)/self.fps
+        # Calculate custom fps from slider to evaluate audio speed playback
+        # Change audio speed slider too volume slider
+        fpsorig = self.media_capture.get(cv2.CAP_PROP_FPS)
+        if self.main_window.control['VideoPlaybackCustomFpsToggle'] and not self.recording: # Use custom FPS only for playback
+            fpscust = self.main_window.control['VideoPlaybackCustomFpsSlider']
+        fpsdiv = fpscust / fpsorig
+        if fpsdiv < 0.5: fpsdiv = 0.5
+        args =  ["ffplay",
+                '-vn',
+                '-ss', str(seek_time),
+                '-nodisp',
+                '-stats',
+                '-loglevel',  'quiet',
+                '-sync',  'audio',
+                '-af', f'volume={self.main_window.control["LiveSoundVolumeDecimalSlider"]}, atempo={fpsdiv}', # Audio speed and volume
+                self.media_path]
+
+        self.ffplay_sound_sp = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def stop_live_sound(self):
+        if self.ffplay_sound_sp:
+            parent_pid = self.ffplay_sound_sp.pid
+
+            try:
+                # Terminate any child processes spawned by ffplay
+                try:
+                    parent_proc = psutil.Process(parent_pid)
+                    children = parent_proc.children(recursive=True)
+                    for child in children:
+                        try:
+                            child.kill()
+                        except psutil.NoSuchProcess:
+                            pass  # The child process has already terminated
+                except psutil.NoSuchProcess:
+                    pass  # The parent process has already terminated
+
+                # Terminate the parent process
+                self.ffplay_sound_sp.terminate()
+                try:
+                    self.ffplay_sound_sp.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.ffplay_sound_sp.kill()
+
+            except psutil.NoSuchProcess:
+                pass  # The process no longer exists
+
+            self.ffplay_sound_sp = None
+
     # --- End Multi-Segment Methods ---
 
     # Add method to start webcam streaming
@@ -1629,52 +1640,3 @@ class VideoProcessor(QObject):
         self.frame_display_timer.start(interval)
         self.gpu_memory_update_timer.start(5000)
         self.processing_started_signal.emit()
-        
-    def start_live_sound(self):
-        # Start up audio if requested
-        seek_time = (self.next_frame_to_display)/self.fps
-        fpsorig = self.media_capture.get(cv2.CAP_PROP_FPS)
-        if self.main_window.control['VideoPlaybackCustomFpsToggle'] and not self.recording: # Use custom FPS only for playback
-            fpscust = self.main_window.control['VideoPlaybackCustomFpsSlider']
-        fpsdiv = fpscust / fpsorig
-        if fpsdiv < 0.5: fpsdiv = 0.5
-        args =  ["ffplay",
-                '-vn',
-                '-ss', str(seek_time),
-                '-nodisp',
-                '-stats',
-                '-loglevel',  'quiet',
-                '-sync',  'audio',
-                '-af', f'volume={self.main_window.control["LiveSoundVolumeDecimalSlider"]}, atempo={fpsdiv}',
-                self.media_path]
-
-        self.ffplay_sound_sp = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-
-    def stop_live_sound(self):
-        if self.ffplay_sound_sp:
-            parent_pid = self.ffplay_sound_sp.pid
-
-            try:
-                # Terminate any child processes spawned by ffplay
-                try:
-                    parent_proc = psutil.Process(parent_pid)
-                    children = parent_proc.children(recursive=True)
-                    for child in children:
-                        try:
-                            child.kill()
-                        except psutil.NoSuchProcess:
-                            pass  # The child process has already terminated
-                except psutil.NoSuchProcess:
-                    pass  # The parent process has already terminated
-
-                # Terminate the parent process
-                self.ffplay_sound_sp.terminate()
-                try:
-                    self.ffplay_sound_sp.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    self.ffplay_sound_sp.kill()
-
-            except psutil.NoSuchProcess:
-                pass  # The process no longer exists
-
-            self.ffplay_sound_sp = None

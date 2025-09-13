@@ -668,4 +668,3 @@ def start_processing_all_jobs(main_window: "MainWindow"):
     print("[DEBUG] About to start job_processor thread...")
     main_window.job_processor.start()
     print("[DEBUG] Exiting start_processing_all_jobs...")
-

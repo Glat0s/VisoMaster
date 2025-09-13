@@ -138,7 +138,7 @@ class InputFacesLoaderWorker(qtc.QThread):
             models_processor.models[detect_model] = models_processor.load_model(detect_model)
         if not models_processor.models[landmark_detect_model] and control['LandmarkDetectToggle']:
             models_processor.models[landmark_detect_model] = models_processor.load_model(landmark_detect_model)
-        for recognition_model in ['Inswapper128ArcFace', 'SimSwapArcFace']:
+        for recognition_model in ['Inswapper128ArcFace', 'SimSwapArcFace', 'GhostArcFace', 'CSCSArcFace', 'CSCSIDArcFace']:
             if not models_processor.models[recognition_model]:
                 models_processor.models[recognition_model] = models_processor.load_model(recognition_model)
         if was_playing:
@@ -190,11 +190,12 @@ class InputFacesLoaderWorker(qtc.QThread):
                 cropped_img = cropped_img.cpu().numpy()
                 cropped_img = cropped_img[..., ::-1]  # Swap the channels from RGB to BGR
                 face_img = numpy.ascontiguousarray(cropped_img)
+                # crop = cv2.resize(face[2].cpu().numpy(), (82, 82))
                 pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, face_img)
 
                 embedding_store: Dict[str, numpy.ndarray] = {}
                 # Ottenere i valori di 'options'
-                options = SETTINGS_LAYOUT_DATA['Detectors']['RecognitionModelSelection']['options']
+                options = SETTINGS_LAYOUT_DATA['Face Recognition']['RecognitionModelSelection']['options']
                 for option in options:
                     if option != control['RecognitionModelSelection']:
                         target_emb, _ = self.main_window.models_processor.run_recognize_direct(img, face_kps, control['SimilarityTypeSelection'], option)

@@ -24,7 +24,6 @@ def change_threads_number(main_window: 'MainWindow', new_threads_number):
     torch.cuda.empty_cache()
     common_widget_actions.update_gpu_memory_progressbar(main_window)
 
-
 def change_theme(main_window: 'MainWindow', new_theme):
 
     def get_style_data(filename, theme='dark', custom_colors=None):
@@ -38,16 +37,12 @@ def change_theme(main_window: 'MainWindow', new_theme):
     _style = ''
     if new_theme == "Dark":
         _style = get_style_data('dark_styles.qss', 'dark',)
-
     elif new_theme == "Light":
         _style = get_style_data('light_styles.qss', 'light',)
-
     elif new_theme == "Dark-Blue":
-        _style = get_style_data('dark_styles.qss', 'dark',) + qdarkstyle.load_stylesheet() # Applica lo stile dark-blue 
-
+        _style = get_style_data('dark_styles.qss', 'dark',) + qdarkstyle.load_stylesheet() 
     elif new_theme == "True-Dark":
         _style = get_style_data('true_dark.qss', 'dark')
-
     elif new_theme == "Solarized-Dark":
         _style = get_style_data('solarized_dark.qss', 'dark')
     elif new_theme == "Solarized-Light":
@@ -60,8 +55,7 @@ def change_theme(main_window: 'MainWindow', new_theme):
         _style = get_style_data('gruvbox.qss', 'dark')
 
     app.setStyleSheet(_style)
-
-    main_window.update()  # Aggiorna la finestra principale
+    main_window.update()
 
 def set_video_playback_fps(main_window: 'MainWindow', set_video_fps=False):
     # print("Called set_video_playback_fps()")
@@ -87,18 +81,18 @@ def handle_denoiser_state_change(main_window: 'MainWindow', new_value_of_toggle_
     # Determine the state of denoisers *as they were* before this change
     # main_window.control still holds the old values for all controls at this point within exec_function
     old_before_enabled = main_window.control.get('DenoiserUNetEnableBeforeRestorersToggle', False)
-    old_after_first_enabled = main_window.control.get('DenoiserAfterFirstRestorersToggle', False)
+    old_after_first_enabled = main_window.control.get('DenoiserAfterFirstRestorerToggle', False)
     old_after_enabled = main_window.control.get('DenoiserAfterRestorersToggle', False)
     denoiser_was_active = old_before_enabled or old_after_first_enabled or old_after_enabled
 
     # Determine the state of denoisers *as they will be* after this change
     is_now_before_enabled = old_before_enabled # Default to old state
-    is_now_after_first_enabled = old_after_first_enabled  # Default to old state
     is_now_after_enabled = old_after_enabled   # Default to old state
-    
+    is_now_after_first_enabled = old_after_first_enabled  # Default to old state
+
     if control_name_that_changed == 'DenoiserUNetEnableBeforeRestorersToggle':
         is_now_before_enabled = new_value_of_toggle_that_just_changed
-    elif control_name_that_changed == 'DenoiserAfterFirstRestorersToggle':
+    elif control_name_that_changed == 'DenoiserAfterFirstRestorerToggle':
         is_now_after_first_enabled = new_value_of_toggle_that_just_changed
     elif control_name_that_changed == 'DenoiserAfterRestorersToggle':
         is_now_after_enabled = new_value_of_toggle_that_just_changed
@@ -111,7 +105,7 @@ def handle_denoiser_state_change(main_window: 'MainWindow', new_value_of_toggle_
         pass_suffix_to_update = None
         if control_name_that_changed == 'DenoiserUNetEnableBeforeRestorersToggle' and new_value_of_toggle_that_just_changed:
             pass_suffix_to_update = "Before"
-        elif control_name_that_changed == 'DenoiserAfterFirstRestorersToggle' and new_value_of_toggle_that_just_changed:
+        elif control_name_that_changed == 'DenoiserAfterFirstRestorerToggle' and new_value_of_toggle_that_just_changed:
             pass_suffix_to_update = "AfterFirst"
         elif control_name_that_changed == 'DenoiserAfterRestorersToggle' and new_value_of_toggle_that_just_changed:
             pass_suffix_to_update = "After"

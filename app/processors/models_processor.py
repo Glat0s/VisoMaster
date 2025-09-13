@@ -12,6 +12,8 @@ import torch
 import onnx
 from torchvision.transforms import v2
 
+from app.processors.utils import faceutil
+
 # --- NEW KORNIA IMPORT ---
 try:
     import kornia.color as K
@@ -19,7 +21,6 @@ except ImportError:
     K = None # Fallback if Kornia is not installed, can add error handling or power-law
     print("Warning: Kornia library not found. Color space conversions will use power-law approximation.")
 # --- END NEW KORNIA IMPORT ---
-
 from PySide6 import QtCore
 try:
     import tensorrt as trt
@@ -38,8 +39,7 @@ from app.processors.face_swappers import FaceSwappers
 from app.processors.frame_enhancers import FrameEnhancers
 from app.processors.face_editors import FaceEditors
 from app.processors.utils.dfm_model import DFMModel
-from app.processors.models_data import models_list, arcface_mapping_model_dict, models_trt_list, models_dir
-from app.processors.utils import faceutil
+from app.processors.models_data import models_list, arcface_mapping_model_dict, models_trt_list
 from app.helpers.miscellaneous import is_file_exists
 from app.helpers.downloader import download_file
 
@@ -47,8 +47,20 @@ if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
 onnxruntime.set_default_logger_severity(4)
-onnxruntime.log_verbosity_level = -1 # type: ignore
+onnxruntime.log_verbosity_level = -1
 lock = threading.Lock()
+
+SRGB_GAMMA = 2.2 # More precise sRGB gamma handling is complex, this is an approximation
+
+def gamma_encode_linear_rgb_to_srgb(linear_rgb: torch.Tensor, gamma=SRGB_GAMMA):
+    # Assumes input is float in [0,1], linear RGB
+    # linear_rgb -> srgb
+    return torch.pow(linear_rgb.clamp(0.0, 1.0), 1.0 / gamma)
+
+def gamma_decode_srgb_to_linear_rgb(srgb: torch.Tensor, gamma=SRGB_GAMMA):
+    # Assumes input is float in [0,1], sRGB
+    # srgb -> linear_rgb
+    return torch.pow(srgb.clamp(0.0, 1.0), gamma)
 
 class ModelsProcessor(QtCore.QObject):
     processing_complete = QtCore.Signal()
@@ -120,44 +132,11 @@ class ModelsProcessor(QtCore.QObject):
 
     @staticmethod
     def make_ddim_sampling_parameters(alphacums: np.ndarray, ddim_timesteps: np.ndarray, eta: float, verbose: bool=True) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        # alphacums: 0-indexed array of alpha_bar values from step 0 to T-1
-        # ddim_timesteps: 0-indexed array of selected DDPM timesteps for DDIM sampling
-        
-        _alphas = alphacums[ddim_timesteps]
-        
-        # For _alphas_prev, the "previous" alpha_bar for the first DDIM step (smallest t in ddim_timesteps)
-        # is alpha_bar_0 (i.e., alphacums[0]), which is typically 1.0.
-        # For subsequent DDIM steps t_i, the previous alpha_bar is for t_{i-1}.
-        _alphas_prev_indices = np.concatenate((np.array([0]), ddim_timesteps[:-1]))
-        _alphas_prev = alphacums[_alphas_prev_indices]
-        
-        # Alternative LDM logic for _alphas_prev, if ddim_timesteps are DDIM sequence indices (0..S-1) mapped to DDPM steps
-        # and `alphacums` is the full DDPM schedule.
-        # This assumes `ddim_timesteps` are actual DDPM step numbers.
-        # _alphas_prev = np.asarray([alphacums[0]] + alphacums[ddim_timesteps[:-1]].tolist())
-        # The line above is effectively what the concatenated indexing achieves if ddim_timesteps[0] implies the step after 0.
-        # If ddim_timesteps[0] *is* 0, then alphacums[0] is used as prev for alphacums[0], which is fine if eta=0.
-        # Let's stick to the LDM's direct indexing for `alphas_prev` as it appears in their DDIMSampler context
-        # (assuming `ddim_timesteps` are the 0-indexed DDPM steps to be used).
-        _alphas_prev = np.asarray([alphacums[ddim_timesteps[0]-1] if ddim_timesteps[0]>0 else 1.0] + _alphas[:-1].tolist()) # Corrected LDM logic
-        # A simpler way for _alphas_prev if ddim_timesteps are sorted DDPM steps:
-        # For each t in ddim_timesteps, prev_t is the DDPM step *before* it in the DDIM sequence.
-        # For the first t (smallest DDPM step), its "previous" alpha_bar is alpha_bar_0 = 1.0.
-        # For other t_i in ddim_timesteps, its previous is alpha_bar_{t_{i-1}}.
         _prev_t = np.concatenate(([-1], ddim_timesteps[:-1])) # Use -1 to signify "before first step"
         _alphas_prev = np.array([alphacums[pt] if pt != -1 else 1.0 for pt in _prev_t])
-
-
+        _alphas = alphacums[ddim_timesteps]
         sigmas = eta * np.sqrt((1 - _alphas_prev) / (1 - _alphas) * (1 - _alphas / _alphas_prev))
-        # Handle potential NaN if _alphas_prev or _alphas are 1.0 (occurs at step 0 with eta > 0)
         sigmas = np.nan_to_num(sigmas, nan=0.0)
-
-        if verbose:
-            print(f'DDIM Sampling Params: eta={eta}')
-            print(f'  DDIM Timesteps (0-indexed DDPM): {ddim_timesteps}')
-            print(f'  Alphas (alpha_bar_t for each DDIM step): {_alphas}')
-            print(f'  Alphas_prev (alpha_bar_{{t_prev_ddim_step}} for each DDIM step): {_alphas_prev}')
-            print(f'  Sigmas: {sigmas}')
         return sigmas, _alphas, _alphas_prev
 
     def __init__(self, main_window: 'MainWindow', device='cuda'):
@@ -167,10 +146,10 @@ class ModelsProcessor(QtCore.QObject):
         self.provider_name = 'TensorRT'
         self.internal_deep_copied_kv_map: Dict[str, Dict[str, torch.Tensor]] | None = None
         self.internal_kv_map_source_filename: str | None = None
-
         self.device = device
-        self.model_lock = threading.RLock()
+        self.model_lock = threading.RLock()  # Reentrant lock for model access
         self.trt_ep_options = {
+            # 'trt_max_workspace_size': 3 << 30,  # Dimensione massima dello spazio di lavoro in bytes
             'trt_engine_cache_enable': True,
             'trt_engine_cache_path': "tensorrt-engines",
             'trt_timing_cache_enable': True,
@@ -184,26 +163,28 @@ class ModelsProcessor(QtCore.QObject):
             ('CUDAExecutionProvider'),
             ('CPUExecutionProvider')
         ]       
-        self.nThreads = 2
         self.syncvec = torch.empty((1, 1), dtype=torch.float32, device=self.device)
+        self.nThreads = 2
 
-        self.models: Dict[str, onnxruntime.InferenceSession | None] = {} # Allow None
+        # Initialize models and models_path
+        self.models: Dict[str, onnxruntime.InferenceSession] = {}
         self.models_path = {}
         self.models_data = {}
         for model_data in models_list:
             model_name, model_path = model_data['model_name'], model_data['local_path']
-            self.models[model_name] = None 
+            self.models[model_name] = None #Model Instance
             self.models_path[model_name] = model_path
             self.models_data[model_name] = {'local_path': model_data['local_path'], 'hash': model_data['hash'], 'url': model_data.get('url')}
 
         self.dfm_models: Dict[str, DFMModel] = {}
 
         if TENSORRT_AVAILABLE:
-            self.models_trt: Dict[str, TensorRTPredictor | None] = {} # Allow None
+            # Initialize models_trt and models_trt_path
+            self.models_trt = {}
             self.models_trt_path = {}
             for model_data in models_trt_list:
                 model_name, model_path = model_data['model_name'], model_data['local_path']
-                self.models_trt[model_name] = None 
+                self.models_trt[model_name] = None #Model Instance
                 self.models_trt_path[model_name] = model_path
 
         self.face_detectors = FaceDetectors(self)
@@ -215,8 +196,9 @@ class ModelsProcessor(QtCore.QObject):
         self.face_editors = FaceEditors(self)
 
         self.lp_mask_crop_latent = faceutil.create_faded_inner_mask(size=(64, 64), border_thickness=3, fade_thickness=8, blur_radius=3, device=self.device)
-        self.lp_mask_crop_latent = torch.unsqueeze(self.lp_mask_crop_latent, 0) 
-        
+        self.lp_mask_crop_latent = torch.unsqueeze(self.lp_mask_crop_latent, 0) # Shape: [1, 64, 64]
+
+        # Denoiser specific initializations (from VR180 feature, which is correct for the implementation)
         num_ddpm_timesteps = 1000
         linear_start_val = 0.0015 
         linear_end_val = 0.0155   
@@ -228,7 +210,7 @@ class ModelsProcessor(QtCore.QObject):
         )
         self.alphas_np = 1.0 - self.betas_np
         self.alphas_cumprod_np = np.cumprod(self.alphas_np, axis=0)
-        self.alphas_cumprod_torch = torch.from_numpy(self.alphas_cumprod_np).float().to(self.device) # Not used directly in denoiser path
+        self.alphas_cumprod_torch = torch.from_numpy(self.alphas_cumprod_np).float().to(self.device)
         self.vae_scale_factor = 1.0 # Confirmed by user
 
         self.clip_session = []
@@ -257,10 +239,12 @@ class ModelsProcessor(QtCore.QObject):
         self.lp_lip_array = self.face_editors.lp_lip_array
         self.rgb_to_linear_rgb_converter = None
         self.linear_rgb_to_rgb_converter = None
-        
-    # --- Model Loading, Unloading, and Management ---
+
     def load_model(self, model_name, session_options=None):
         with self.model_lock:
+            if self.models.get(model_name):
+                return self.models[model_name]
+
             self.main_window.model_loading_signal.emit()
             try:
                 if session_options is None:
@@ -268,11 +252,13 @@ class ModelsProcessor(QtCore.QObject):
                 else:
                     model_instance = onnxruntime.InferenceSession(self.models_path[model_name], sess_options=session_options, providers=self.providers)
 
-                # Check if another thread has already loaded an instance for this model, if yes then delete the current one and return that instead
-                if self.models[model_name]:
+                # Race condition check: another thread might have loaded it while this one was creating the instance
+                if self.models.get(model_name):
                     del model_instance
                     gc.collect()
-                    return self.models[model_name]
+                    return self.models.get(model_name)
+                
+                self.models[model_name] = model_instance
                 return model_instance
             finally:
                 self.main_window.model_loaded_signal.emit()
@@ -303,18 +289,17 @@ class ModelsProcessor(QtCore.QObject):
         #time.sleep(0.5)
         self.main_window.model_loading_signal.emit()
 
-        try:
-            if not os.path.exists(self.models_trt_path[model_name]):
-                onnx2trt(onnx_model_path=self.models_path[model_name],
-                         trt_model_path=self.models_trt_path[model_name],
-                         precision=precision,
-                         custom_plugin_path=custom_plugin_path,
-                         verbose=False
-                        )
-            model_instance = TensorRTPredictor(model_path=self.models_trt_path[model_name], custom_plugin_path=custom_plugin_path, pool_size=self.nThreads, device=self.device, debug=debug)
-            return model_instance
-        finally:
-            self.main_window.model_loaded_signal.emit()
+        if not os.path.exists(self.models_trt_path[model_name]):
+            onnx2trt(onnx_model_path=self.models_path[model_name],
+                     trt_model_path=self.models_trt_path[model_name],
+                     precision=precision,
+                     custom_plugin_path=custom_plugin_path,
+                     verbose=False
+                    )
+        model_instance = TensorRTPredictor(model_path=self.models_trt_path[model_name], custom_plugin_path=custom_plugin_path, pool_size=self.nThreads, device=self.device, debug=debug)
+
+        self.main_window.model_loaded_signal.emit()
+        return model_instance
 
     def delete_models(self):
         for model_name, model_instance in self.models.items():
@@ -351,7 +336,7 @@ class ModelsProcessor(QtCore.QObject):
             if model_name_to_unload in self.models and self.models.get(model_name_to_unload) is not None:
                 print(f"Unloading model: {model_name_to_unload}")
                 del self.models[model_name_to_unload]
-                self.models[model_name_to_unload] = None 
+                self.models[model_name_to_unload] = None
                 gc.collect()
                 torch.cuda.empty_cache()
             else:
@@ -368,29 +353,29 @@ class ModelsProcessor(QtCore.QObject):
         match provider_name:
             case "TensorRT" | "TensorRT-Engine":
                 providers = [
-                                ('TensorrtExecutionProvider', self.trt_ep_options), # type: ignore
-                                ('CUDAExecutionProvider'), # type: ignore
-                                ('CPUExecutionProvider') # type: ignore
+                                ('TensorrtExecutionProvider', self.trt_ep_options),
+                                ('CUDAExecutionProvider'),
+                                ('CPUExecutionProvider')
                             ]
                 self.device = 'cuda'
-                if TENSORRT_AVAILABLE and version.parse(trt.__version__) < version.parse("10.2.0") and provider_name == "TensorRT-Engine": # type: ignore
+                if version.parse(trt.__version__) < version.parse("10.2.0") and provider_name == "TensorRT-Engine":
                     print("TensorRT-Engine provider cannot be used when TensorRT version is lower than 10.2.0.")
                     provider_name = "TensorRT"
 
             case "CPU":
                 providers = [
-                                ('CPUExecutionProvider') # type: ignore
+                                ('CPUExecutionProvider')
                             ]
                 self.device = 'cpu'
             case "CUDA":
                 providers = [
-                                ('CUDAExecutionProvider'), # type: ignore
-                                ('CPUExecutionProvider') # type: ignore
+                                ('CUDAExecutionProvider'),
+                                ('CPUExecutionProvider')
                             ]
                 self.device = 'cuda'
             #case _:
 
-        self.providers = providers # type: ignore
+        self.providers = providers
         self.provider_name = provider_name
         self.lp_mask_crop = self.lp_mask_crop.to(self.device)
 
@@ -460,10 +445,8 @@ class ModelsProcessor(QtCore.QObject):
             if not self.models[model_name]:
                 self.main_window.model_loading_signal.emit()
                 graph = onnx.load(self.models_path[model_name]).graph
-                self.emap = onnx.numpy_helper.to_array(graph.initializer[-1]) # type: ignore
+                self.emap = onnx.numpy_helper.to_array(graph.initializer[-1])
                 self.main_window.model_loaded_signal.emit()
-
-    # --- Face Processing Methods ---
 
     def run_detect(self, img, detect_mode='RetinaFace', max_num=1, score=0.5, input_size=(512, 512), use_landmark_detection=False, landmark_detect_mode='203', landmark_score=0.5, from_points=False, rotation_angles=None):
         rotation_angles = rotation_angles or [0]
@@ -480,8 +463,6 @@ class ModelsProcessor(QtCore.QObject):
 
     def run_recognize_direct(self, img, kps, similarity_type='Opal', arcface_model='Inswapper128ArcFace'):
         return self.face_swappers.run_recognize_direct(img, kps, similarity_type, arcface_model)
-
-    # --- Swapper Methods ---
 
     def calc_inswapper_latent(self, source_embedding):
         return self.face_swappers.calc_inswapper_latent(source_embedding)
@@ -513,8 +494,6 @@ class ModelsProcessor(QtCore.QObject):
     def run_swapper_cscs(self, image, embedding, output):
         self.face_swappers.run_swapper_cscs(image, embedding, output)
 
-    # --- Frame Enhancer Methods ---
-
     def run_enhance_frame_tile_process(self, img, enhancer_type, tile_size=256, scale=1):
         return self.frame_enhancers.run_enhance_frame_tile_process(img, enhancer_type, tile_size, scale)
 
@@ -533,8 +512,6 @@ class ModelsProcessor(QtCore.QObject):
     def run_ddcolor(self, tensor_gray_rgb, output_ab):
         return self.frame_enhancers.run_ddcolor(tensor_gray_rgb, output_ab)
 
-    # --- Masking Methods ---
-
     def run_occluder(self, image, output):
         self.face_masks.run_occluder(image, output)
 
@@ -544,9 +521,10 @@ class ModelsProcessor(QtCore.QObject):
     def run_faceparser(self, image, output):
         self.face_masks.run_faceparser(image, output)
 
-    # --- LivePortrait (Face Editor) Methods ---
+    def run_CLIPs(self, img, CLIPText, CLIPAmount):
+        return self.face_masks.run_CLIPs(img, CLIPText, CLIPAmount)
     
-    def lp_motion_extractor(self, img, face_editor_type='Human-Face', **kwargs) -> dict: # type: ignore
+    def lp_motion_extractor(self, img, face_editor_type='Human-Face', **kwargs) -> dict:
         return self.face_editors.lp_motion_extractor(img, face_editor_type, **kwargs)
 
     def lp_appearance_feature_extractor(self, img, face_editor_type='Human-Face'):
@@ -567,16 +545,14 @@ class ModelsProcessor(QtCore.QObject):
     def lp_warp_decode(self, feature_3d: torch.Tensor, kp_source: torch.Tensor, kp_driving: torch.Tensor, face_editor_type='Human-Face') -> torch.Tensor:
         return self.face_editors.lp_warp_decode(feature_3d, kp_source, kp_driving, face_editor_type)
 
-    # --- Utility and Combined Methods ---
-
     def findCosineDistance(self, vector1, vector2):
         vector1 = vector1.ravel()
         vector2 = vector2.ravel()
-        cos_dist = 1 - np.dot(vector1, vector2)/(np.linalg.norm(vector1)*np.linalg.norm(vector2)) # 2..0
-        return 100-cos_dist*50
+        cos_dist = 1 - np.dot(vector1, vector2) / (np.linalg.norm(vector1) * np.linalg.norm(vector2))  # 2..0
+        return 100 - cos_dist * 50
 
-    def apply_facerestorer(self, swapped_face_upscaled, restorer_det_type, restorer_type, restorer_blend, detect_score):
-        return self.face_restorers.apply_facerestorer(swapped_face_upscaled, restorer_det_type, restorer_type, restorer_blend, detect_score)
+    def apply_facerestorer(self, swapped_face_upscaled, restorer_det_type, restorer_type, restorer_blend, fidelity_weight, detect_score, interpolation_method):
+        return self.face_restorers.apply_facerestorer(swapped_face_upscaled, restorer_det_type, restorer_type, restorer_blend, fidelity_weight, detect_score, interpolation_method)
 
     def apply_occlusion(self, img, amount):
         return self.face_masks.apply_occlusion(img, amount)
@@ -584,12 +560,9 @@ class ModelsProcessor(QtCore.QObject):
     def apply_dfl_xseg(self, img, amount, background, mouth, parameters):
         return self.face_masks.apply_dfl_xseg(img, amount, background, mouth, parameters)
     
-    #def apply_face_parser(self, img, parameters):
-    #    return self.face_masks.apply_face_parser(img, parameters)
-        
     def process_masks_and_masks(self, swap_restorecalc, original_face_512, parameters):
         return self.face_masks.process_masks_and_masks(swap_restorecalc, original_face_512, parameters)
-    
+         
     def apply_face_makeup(self, img, parameters):
         return self.face_editors.apply_face_makeup(img, parameters)
     
@@ -599,33 +572,20 @@ class ModelsProcessor(QtCore.QObject):
     def restore_eyes(self, img_orig, img_swap, kpss_orig, blend_alpha=0.5, feather_radius=10, size_factor=3.5, radius_factor_x=1.0, radius_factor_y=1.0, x_offset=0, y_offset=0, eye_spacing_offset=0):
         return self.face_masks.restore_eyes(img_orig, img_swap, kpss_orig, blend_alpha, feather_radius, size_factor, radius_factor_x, radius_factor_y, x_offset, y_offset, eye_spacing_offset)
 
-    def apply_fake_diff(self, swapped_face, original_face, DiffAmount):
-        return self.face_masks.apply_fake_diff(swapped_face, original_face, DiffAmount)
-        
-    def run_onnx(self, image, output):
-        return self.face_masks.run_onnx(image, output)
-    
+    def apply_fake_diff(self, swapped_face, original_face, lower_limit_thresh, lower_value, upper_thresh, upper_value, middle_value, parameters):
+        return self.face_masks.apply_fake_diff(swapped_face, original_face, lower_limit_thresh, lower_value, upper_thresh, upper_value, middle_value, parameters)
+
+    def run_onnx(self, image, output, model_key):
+        return self.face_masks.run_onnx(image, output, model_key)
+
     def apply_perceptual_diff_onnx(self, swapped_face, original_face, swap_mask, lower_limit_thresh, lower_value, upper_thresh, upper_value, middle_value, feature_layer, ExcludeVGGMaskEnableToggle):
         return self.face_masks.apply_perceptual_diff_onnx(swapped_face, original_face, swap_mask, lower_limit_thresh, lower_value, upper_thresh, upper_value, middle_value, feature_layer, ExcludeVGGMaskEnableToggle)
 
-
-    # --- UNet Denoiser Specific Methods ---
-    
     @staticmethod 
     def extract_into_tensor_torch(a: torch.Tensor, t: torch.Tensor, x_shape: tuple) -> torch.Tensor:
-        """
-        Extracts values from tensor 'a' at indices 't' and reshapes for broadcasting with 'x_shape'.
-        'a': 1D tensor of schedule values.
-        't': 0D or 1D tensor of indices.
-        'x_shape': Shape of the tensor 'x' (e.g., noisy image) to broadcast with.
-        """
-        if t.ndim == 0: # If t is a scalar tensor
-            t = t.unsqueeze(0) # Make it 1D for gather
-            
-        b = t.shape[0] # Batch size from t
-        # 'a' is 1D, 't' is 1D. gather needs t to be long.
+        if t.ndim == 0: t = t.unsqueeze(0)
+        b = t.shape[0]
         out = torch.gather(a, 0, t.long()) 
-        # Reshape 'out' to (b, 1, 1, ...) to match dimensions of x_shape for broadcasting
         return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
     def apply_denoiser_unet(self,
@@ -634,14 +594,13 @@ class ModelsProcessor(QtCore.QObject):
                             use_reference_exclusive_path: bool,
                             denoiser_mode: str = "Single Step (Fast)",
                             denoiser_single_step_t: int = 1,
-                            denoiser_ddim_steps: int = 5,
+                            denoiser_ddim_steps: int = 20,
                             denoiser_cfg_scale: float = 1.0,
                             denoiser_ddim_eta: float = 0.0,
-                            base_seed: int = 0
+                            base_seed: int = 220
                             #blur_sigma_before_sharpen: float = 0.5,
                             #sharpen_strength: float = 0.5
                             ) -> torch.Tensor:
-
         # This flag is already defined in the original file.
         DEBUG_DENOISER = False
         unet_model_name = self.main_window.fixed_unet_model_name
@@ -755,9 +714,7 @@ class ModelsProcessor(QtCore.QObject):
             
             num_ddpm_timesteps = self.alphas_cumprod_np.shape[0]
             _ddim_raw_ddpm_timesteps_np = ModelsProcessor.make_ddim_timesteps(
-                ddim_discr_method="uniform",
-                #ddim_discr_method="uniform_trailing",
-                #ddim_discr_method="quad",
+                ddim_discr_method="uniform", 
                 num_ddim_timesteps=denoiser_ddim_steps,
                 num_ddpm_timesteps=num_ddpm_timesteps,
                 verbose=DEBUG_DENOISER
@@ -783,14 +740,13 @@ class ModelsProcessor(QtCore.QObject):
                 ts_unet = torch.full((1,), step_ddpm_idx, device=self.device, dtype=torch.int64)
                 unet_input_cond = torch.cat([current_latent_xt_scaled, lq_latent_x0_scaled_for_unet], dim=1)
                 e_t_cond = torch.empty_like(lq_latent_x0_scaled_for_unet)
-                use_kv_path_tensor_cond = torch.tensor([should_use_kv_in_unet], dtype=torch.bool, device=self.device).contiguous()
                 
                 self.face_restorers.run_ref_ldm_unet(
                     x_noisy_plus_lq_latent=unet_input_cond,
                     timesteps_tensor=ts_unet,
                     is_ref_flag_tensor=is_ref_flag_tensor_for_unet,
-                    use_reference_exclusive_path_globally_tensor=use_kv_path_tensor_cond,
-                    kv_tensor_map=kv_tensor_map_for_this_run if should_use_kv_in_unet else None,
+                    use_reference_exclusive_path_globally_tensor=actual_use_exclusive_path_tensor_for_unet,
+                    kv_tensor_map=kv_tensor_map_for_this_run, # Pass directly, can be None
                     output_unet_tensor=e_t_cond
                 )
                 e_t = e_t_cond
@@ -817,7 +773,6 @@ class ModelsProcessor(QtCore.QObject):
                 pred_x0_scaled_current_step = (current_latent_xt_scaled - sqrt_one_minus_a_t * e_t) / torch.sqrt(a_t).clamp(min=1e-8) # Clamp to avoid div by zero if a_t is 0
                 dir_xt = torch.sqrt(torch.clamp(1. - a_prev - sigma_t**2, min=1e-8)) * e_t # Clamp to avoid sqrt of negative
                 # torch.manual_seed(base_seed + step_ddpm_idx) # Seeding here per DDIM step is valid, but let's test seeding once before loop
-                #torch.manual_seed(base_seed)
                 noise_ddim = sigma_t * torch.randn_like(current_latent_xt_scaled)
                 current_latent_xt_scaled = torch.sqrt(a_prev) * pred_x0_scaled_current_step + dir_xt + noise_ddim
             final_denoised_latent_x0_scaled = pred_x0_scaled_current_step
@@ -845,11 +800,6 @@ class ModelsProcessor(QtCore.QObject):
         image_after_postproc_float_0_1 = (decoded_image_soft_clamped_bchw.squeeze(0) + 1.0) / 2.0
         image_after_postproc_float_0_1 = torch.clamp(image_after_postproc_float_0_1, 0.0, 1.0)
 
-        #To switch back modification made for color
-        #self.face_restorers.run_vae_decoder(latent_for_vae_decoder, decoded_image_normalized_bchw)
-        #decoded_image_srgb_float_0_1_squeezed = torch.clamp((decoded_image_normalized_bchw.squeeze(0) + 1.0) / 2.0, 0.0, 1.0)
-        #ModelsProcessor.print_tensor_stats(decoded_image_srgb_float_0_1_squeezed, "VAE Decoded: sRGB [0,1] (Clamped)", DEBUG_DENOISER)        
-        #image_after_postproc_float_0_1 = decoded_image_srgb_float_0_1_squeezed        
         
         final_image_uint8 = (image_after_postproc_float_0_1 * 255.0).byte()
 

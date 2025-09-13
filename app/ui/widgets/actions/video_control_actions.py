@@ -3,12 +3,12 @@ import copy
 import os
 from functools import partial
 
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QMenu
 import cv2
 import numpy
 from PIL import Image
 from PySide6 import QtGui,QtWidgets,QtCore
-from PySide6.QtCore import QPoint
-from PySide6.QtWidgets import QMenu
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
@@ -56,7 +56,7 @@ def set_up_video_seek_slider(main_window: 'MainWindow'):
 
         # Get groove and handle geometry
         groove_rect = style.subControlRect(
-            QtWidgets.QStyle.ComplexControl.CC_Slider, opt, QtWidgets.QStyle.SubControl.SC_SliderGroove, self
+            QtWidgets.QStyle.ComplexControl.CC_Slider, opt, QtWidgets.QStyle.SubControl.SC_SliderGroove
         )
         groove_y = (groove_rect.top() + groove_rect.bottom()) // 2  # Groove's vertical center
         groove_start = groove_rect.left()
@@ -69,7 +69,7 @@ def set_up_video_seek_slider(main_window: 'MainWindow'):
 
         # Make the handle thinner
         handle_width = 5  # Fixed width for thin handle
-        handle_height = int(groove_rect.height() * 1.5)  # Slightly shorter than groove height
+        handle_height = groove_rect.height()  # Slightly shorter than groove height
         handle_left_x = handle_center_x - (handle_width // 2)
         handle_top_y = groove_y - (handle_height // 2)
 
@@ -87,16 +87,14 @@ def set_up_video_seek_slider(main_window: 'MainWindow'):
         painter.setBrush(QtGui.QBrush(QtGui.QColor("white")))  # Handle fill color
         painter.drawRect(handle_rect)
 
-        # Draw standard markers (if any)
+        # Draw markers (if any)
         if self.markers:
             painter.setPen(QtGui.QPen(QtGui.QColor("#4090a3"), 3))  # Marker color and thickness
             for value in sorted(self.markers):
                 # Calculate marker position
                 marker_normalized_value = (value - self.minimum()) / (self.maximum() - self.minimum())
                 marker_x = groove_start + marker_normalized_value * groove_width
-                vertical_extension = int(groove_rect.height() * 0.5)
-                painter.drawLine(marker_x, groove_rect.top() - vertical_extension, marker_x, groove_rect.bottom() + vertical_extension)
-
+                painter.drawLine(marker_x, groove_rect.top(), marker_x, groove_rect.bottom())
         # Draw Job Start/End Brackets on the groove line
         painter.setFont(QtGui.QFont('Arial', 16, QtGui.QFont.Bold)) # Increased font size from 12 to 16
         font_metrics = painter.fontMetrics()
@@ -135,6 +133,82 @@ def add_video_slider_marker(main_window: 'MainWindow'):
         common_widget_actions.create_and_show_messagebox(main_window, 'Marker Already Exists!', 'A Marker already exists for this position!', main_window.videoSeekSlider)
     else:
         add_marker(main_window, copy.deepcopy(main_window.parameters), main_window.control.copy(), current_position)
+
+def show_add_marker_menu(main_window: 'MainWindow'):
+    """Shows a context menu for adding different types of markers."""
+    if not main_window.selected_video_button or main_window.selected_video_button.file_type != 'video':
+        common_widget_actions.create_and_show_messagebox(main_window, 'Markers Not Available', 'Markers can only be used for videos!', main_window.videoSeekSlider)
+        return
+
+    button = main_window.addMarkerButton
+    menu = QMenu(main_window)
+
+    # Action for standard marker
+    add_standard_action = menu.addAction("Add Standard Marker")
+    add_standard_action.triggered.connect(lambda: add_video_slider_marker(main_window))
+
+    menu.addSeparator()
+
+    # Determine if the next action should be adding a start or an end marker
+    can_add_start = True
+    can_add_end = False
+    if main_window.job_marker_pairs:
+        last_pair = main_window.job_marker_pairs[-1]
+        if last_pair[1] is None: # Last pair is incomplete (start set, end not set)
+            can_add_start = False
+            can_add_end = True
+
+    # Action for job start marker
+    set_start_action = menu.addAction("Add Record Start Marker")
+    set_start_action.triggered.connect(lambda: set_job_start_frame(main_window))
+    set_start_action.setEnabled(can_add_start)
+
+    # Action for job end marker
+    set_end_action = menu.addAction("Add Record End Marker")
+    set_end_action.triggered.connect(lambda: set_job_end_frame(main_window))
+    set_end_action.setEnabled(can_add_end)
+
+    # Show the menu below the button
+    menu.exec(button.mapToGlobal(QPoint(0, button.height())))
+
+def set_job_start_frame(main_window: 'MainWindow'):
+    """Adds a new job marker pair starting at the current slider position."""
+    current_pos = int(main_window.videoSeekSlider.value())
+
+    # Basic validation: Ensure we are not adding a start if the last pair is incomplete
+    if main_window.job_marker_pairs and main_window.job_marker_pairs[-1][1] is None:
+         QtWidgets.QMessageBox.warning(main_window, "Invalid Action",
+                                     "Cannot add a new Start marker before completing the previous End marker.")
+         return
+
+    # Add the new start marker (end frame is initially None)
+    main_window.job_marker_pairs.append((current_pos, None))
+    main_window.videoSeekSlider.update() # Trigger repaint to show the new marker
+    print(f"Job Start Marker added for pair {len(main_window.job_marker_pairs)} at Frame: {current_pos}")
+
+def set_job_end_frame(main_window: 'MainWindow'):
+    """Sets the job end frame marker for the last incomplete pair."""
+    current_pos = int(main_window.videoSeekSlider.value())
+
+    # Validation: Check if there's an incomplete pair to add an end to
+    if not main_window.job_marker_pairs or main_window.job_marker_pairs[-1][1] is not None:
+        QtWidgets.QMessageBox.critical(main_window, "Error",
+                                     "Cannot set End marker without a preceding Start marker.")
+        return
+
+    last_pair_index = len(main_window.job_marker_pairs) - 1
+    start_frame = main_window.job_marker_pairs[last_pair_index][0]
+
+    # Validation: Check end frame is after start frame
+    if current_pos <= start_frame:
+        QtWidgets.QMessageBox.warning(main_window, "Invalid Position",
+                                    "Job end frame must be after the job start frame.")
+        return
+
+    # Update the last pair with the end frame
+    main_window.job_marker_pairs[last_pair_index] = (start_frame, current_pos)
+    main_window.videoSeekSlider.update() # Trigger repaint to show the new marker
+    print(f"Job End Marker added for pair {last_pair_index + 1} at Frame: {current_pos}")
 
 def remove_video_slider_marker(main_window: 'MainWindow'):
     if not main_window.selected_video_button or main_window.selected_video_button.file_type != 'video':
@@ -177,18 +251,6 @@ def remove_marker(main_window: 'MainWindow', position):
         main_window.markers.pop(position)
         print(f"Marker Removed from position: {position}")
 
-def remove_all_markers(main_window: 'MainWindow'):
-    # Clear standard markers
-    standard_markers_positions = list(main_window.markers.keys())
-    for marker_position in standard_markers_positions:
-        remove_marker(main_window, marker_position) # This already calls slider.update()
-    
-    # Clear job marker pairs
-    if main_window.job_marker_pairs:
-        print("Clearing job marker pairs.")
-        main_window.job_marker_pairs.clear()
-        main_window.videoSeekSlider.update() # Ensure slider redraws without job brackets
-
 def move_slider_to_nearest_marker(main_window: 'MainWindow', direction: str):
     """
     Move the slider to the nearest marker in the specified direction.
@@ -197,6 +259,7 @@ def move_slider_to_nearest_marker(main_window: 'MainWindow', direction: str):
     """
     new_position = None
     current_position = int(main_window.videoSeekSlider.value())
+    
     # Combine standard markers with all job start/end markers from pairs
     all_markers = set(main_window.markers.keys())
     for start_frame, end_frame in main_window.job_marker_pairs:
@@ -230,11 +293,18 @@ def move_slider_to_previous_nearest_marker(main_window: 'MainWindow'):
 
 def remove_face_parameters_and_control_from_markers(main_window: 'MainWindow', face_id):
     for _, marker_data in main_window.markers.items():
-        marker_data['parameters'].pop(face_id)
+        marker_data['parameters'].pop(face_id, None) # Use .pop with default to avoid KeyError
         # If the parameters is empty, then there is no longer any marker to be set for any target face
         if not marker_data['parameters']:
             delete_all_markers(main_window)
             break
+
+def remove_all_markers(main_window: 'MainWindow'):
+    standard_markers_positions = list(main_window.markers.keys())
+    for marker_position in standard_markers_positions: remove_marker(main_window, marker_position)
+    if main_window.job_marker_pairs:
+        print("Clearing job marker pairs.")
+        main_window.job_marker_pairs.clear(); main_window.videoSeekSlider.update()
 
 def advance_video_slider_by_n_frames(main_window: 'MainWindow', n=30):
     video_processor = main_window.video_processor
@@ -366,18 +436,8 @@ def enable_zoom_and_pan(view: QtWidgets.QGraphicsView):
 
 def play_video(main_window: 'MainWindow', checked: bool):
     video_processor = main_window.video_processor
-    # Handle webcam streaming separately
-    if checked and video_processor.file_type == 'webcam':
-        if video_processor.processing:
-            print("play_video: Webcam already streaming. Stopping the stream before restarting.")
-            video_processor.stop_processing()
-        print("play_video: Starting webcam stream processing.")
-        set_play_button_icon_to_stop(main_window)
-        video_processor.process_webcam()
-        return
     if checked:
-        # Video playback or recording
-        if video_processor.processing or video_processor.current_frame_number == video_processor.max_frame_number:
+        if video_processor.processing or video_processor.current_frame_number==video_processor.max_frame_number:
             print("play_video: Video already playing. Stopping the current video before starting a new one.")
             video_processor.stop_processing()
             return
@@ -386,7 +446,7 @@ def play_video(main_window: 'MainWindow', checked: bool):
         video_processor.process_video()
     else:
         video_processor = main_window.video_processor
-        # Stop playback or webcam streaming
+        # print("play_video: Stopping video processing.")
         set_play_button_icon_to_play(main_window)
         video_processor.stop_processing()
         main_window.buttonMediaRecord.blockSignals(True)
@@ -406,18 +466,15 @@ def record_video(main_window: 'MainWindow', checked: bool):
         if video_processor.file_type == 'webcam':
             common_widget_actions.create_and_show_messagebox(main_window, 'Recording Not Supported', 'Recording webcam stream is not supported yet.', main_window)
         return
-
-    if checked: # Start Recording Request
-        # --- Pre-checks ---
+    
+    if checked:
         if video_processor.processing or video_processor.is_processing_segments:
-             print("record_video: Processing already active. Request ignored.")
-             # Keep button checked state consistent with actual state (which is already processing)
-             main_window.buttonMediaRecord.blockSignals(True)
-             main_window.buttonMediaRecord.setChecked(True)
-             main_window.buttonMediaRecord.blockSignals(False)
-             set_record_button_icon_to_stop(main_window)
-             return
-
+            print("record_video: Processing already active. Request ignored.")
+            main_window.buttonMediaRecord.blockSignals(True)
+            main_window.buttonMediaRecord.setChecked(True)
+            main_window.buttonMediaRecord.blockSignals(False)
+            set_record_button_icon_to_stop(main_window)
+            return
         if not main_window.control.get('OutputMediaFolder','').strip():
             common_widget_actions.create_and_show_messagebox(main_window, 'No Output Folder Selected','Please select an Output folder before recording!', main_window)
             main_window.buttonMediaRecord.setChecked(False) # Uncheck the button
@@ -426,9 +483,7 @@ def record_video(main_window: 'MainWindow', checked: bool):
             common_widget_actions.create_and_show_messagebox(main_window, 'FFMPEG Not Found','FFMPEG was not found in your system. Check installation!', main_window)
             main_window.buttonMediaRecord.setChecked(False) # Uncheck the button
             return
-        # --- End Pre-checks ---
-
-        # --- Default Recording vs Segment Recording Logic ---
+        
         marker_pairs = main_window.job_marker_pairs
         if not marker_pairs: # NO MARKERS SET -> Default Recording Style
             # --- Validate start position for default recording ---
@@ -451,7 +506,6 @@ def record_video(main_window: 'MainWindow', checked: bool):
             set_record_button_icon_to_stop(main_window)
             # Disable play button during recording
             main_window.buttonMediaPlay.setEnabled(False)
-            # No need to disable parameters/controls here, process_video handles it
             video_processor.recording = True # SET THE FLAG FOR DEFAULT RECORDING
             video_processor.process_video()  # CALL THE DEFAULT PROCESSOR
 
@@ -477,43 +531,33 @@ def record_video(main_window: 'MainWindow', checked: bool):
                 set_record_button_icon_to_stop(main_window)
                 # Disable play button during segment recording
                 main_window.buttonMediaPlay.setEnabled(False)
-                # Disable parameters/controls during multi-segment recording (handled by start_multi_segment)
-                # layout_actions.disable_all_parameters_and_control_widget(main_window) # Removed, handled internally
-
-                # --- Check if triggered by Job Manager for this recording ---
                 is_job_context = job_mgr_flag
                 print(f"[DEBUG] record_video: job_mgr_flag = {is_job_context}")
                 video_processor.start_multi_segment_recording(
                     valid_pairs,
                     triggered_by_job_manager=is_job_context
                 )
-                # Clear the flag so manual recordings won't be considered job-initiated
                 try:
                     main_window.job_manager_initiated_record = False
                 except Exception:
                     pass
             else:
                 print("[WARN] Recording not started due to invalid marker configuration.")
-                # main_window.buttonMediaRecord.setChecked(False) # Handled in validation
 
-    else: # Stop Recording Request (checked is False)
+    else:
         if video_processor.is_processing_segments:
             print("Record button released: User requested stop during segment processing. Finalizing...")
             # Finalize segment concatenation with segments processed so far
             video_processor.finalize_segment_concatenation()
-            # Finalization methods should handle resetting buttons/UI, no need to call stop_processing
         elif video_processor.recording: # Check if default style recording was active
             print("Record button released: User requested stop during default recording. Finalizing...")
             # Finalize the default style recording
             video_processor._finalize_default_style_recording()
-            # Finalization methods should handle resetting buttons/UI
         else:
             # No recording was active (maybe an immediate click-off or already stopped)
             print("Record button released: No active recording found.")
-            # Ensure UI is in the correct state
             set_record_button_icon_to_play(main_window)
             main_window.buttonMediaPlay.setEnabled(True)
-            # Reset buttons just in case state is inconsistent
             reset_media_buttons(main_window)
 
 def set_record_button_icon_to_play(main_window: 'MainWindow'):
@@ -539,22 +583,10 @@ def reset_media_buttons(main_window: 'MainWindow'):
     main_window.buttonMediaPlay.blockSignals(False)
     main_window.buttonMediaRecord.blockSignals(True)
     main_window.buttonMediaRecord.setChecked(False)
-    main_window.buttonMediaRecord.setEnabled(True) # Re-enable the button
     main_window.buttonMediaRecord.blockSignals(False)
     set_play_button_icon(main_window)
     set_record_button_icon(main_window)
 
-def toggle_live_sound(main_window: 'MainWindow', toggle_value: bool):
-    video_processor = main_window.video_processor
-    was_processing = video_processor.processing
-
-    # If the video was playing, then stop and start it again to enable the audio
-    # Otherwise, just the toggle value so that the next time the play button is hit, it would automatically enable/disable the audio
-    # The play button is clicked twice in the below block to simulate the above mentioned behaviour. It should be changed into a set up in the next refactor
-    if was_processing:
-        main_window.buttonMediaPlay.click()
-        main_window.buttonMediaPlay.click()
-        
 def set_play_button_icon(main_window: 'MainWindow'):
     if main_window.buttonMediaPlay.isChecked(): 
         main_window.buttonMediaPlay.setIcon(QtGui.QIcon(":/media/media/play_on.png"))
@@ -574,48 +606,30 @@ def set_record_button_icon(main_window: 'MainWindow'):
 # @misc_helpers.benchmark
 @QtCore.Slot(int)
 def on_change_video_seek_slider(main_window: 'MainWindow', new_position=0):
+    # print("Called on_change_video_seek_slider()")
     video_processor = main_window.video_processor
-    main_window.last_seek_read_failed = False # Reset flag at the start
 
-    # Stop any ongoing playback or segment processing before seeking
-    was_processing = video_processor.stop_processing() 
-
-    if not video_processor.media_capture:
-        return
-
-    # Clamp new_position to valid range [0, max_frame_number]
-    new_position = max(0, min(new_position, video_processor.max_frame_number))
+    was_processing = video_processor.stop_processing()
+    if was_processing:
+        print("on_change_video_seek_slider: Processing in progress. Stopping current processing.")
 
     video_processor.current_frame_number = new_position
     video_processor.next_frame_to_display = new_position
-    
-    seek_position = new_position # Always seek to the target position directly now
-    # print(f"Slider changed to frame {new_position}. Seeking.") # Removed print
-
-    # Seek the video capture object
-    video_processor.media_capture.set(cv2.CAP_PROP_POS_FRAMES, seek_position)
-
-    # Read the frame *after* seeking
-    # print(f"Attempting to read frame {seek_position} after seeking...") # Removed print
-    ret, frame = misc_helpers.read_frame(video_processor.media_capture)
-    
-    if ret:
-        # print(f"Successfully read frame {seek_position}. Updating display for frame {new_position}.") # Removed print
-        # Update the display with the actual frame number we intended to show (new_position)
-        pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
-        graphics_view_actions.update_graphics_view(main_window, pixmap, new_position) 
-        
-        # Update UI elements based on markers at the target position
-        update_parameters_and_control_from_marker(main_window, new_position)
-        update_widget_values_from_markers(main_window, new_position)
-    else:
-        # print(f"[WARN] Failed to read frame {seek_position} after seeking.") # Removed print
-        main_window.last_seek_read_failed = True # Set the flag indicating read failure
-        # Do not update the graphics view if read failed
-         # Optionally display the error or handle it gracefully
-         # main_window.display_messagebox_signal.emit('Seek Error', f'Could not read frame {new_position} after seeking.', main_window)
-
-    # print("on_change_video_seek_slider: Finished.") # Removed print
+    if video_processor.media_capture:
+        video_processor.media_capture.set(cv2.CAP_PROP_POS_FRAMES, new_position)
+        ret, frame = misc_helpers.read_frame(video_processor.media_capture)
+        if ret:
+            pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
+            graphics_view_actions.update_graphics_view(main_window, pixmap, new_position)
+            # if video_processor.current_frame_number == video_processor.max_frame_number:
+            #     video_processor.media_capture.set(cv2.CAP_PROP_POS_FRAMES, new_position)
+            update_parameters_and_control_from_marker(main_window, new_position)
+            update_widget_values_from_markers(main_window, new_position)
+        else:
+            main_window.last_seek_read_failed = True
+            
+    # Do not automatically restart the video, let the user press Play to resume
+    # print("on_change_video_seek_slider: Video stopped after slider movement.")
 
 def update_parameters_and_control_from_marker(main_window: 'MainWindow', new_position: int):
     marker_data = main_window.markers.get(new_position)
@@ -623,20 +637,17 @@ def update_parameters_and_control_from_marker(main_window: 'MainWindow', new_pos
         # Load parameters from the marker as a base
         loaded_marker_params = copy.deepcopy(marker_data['parameters'])
         main_window.parameters = loaded_marker_params
-        
         active_target_face_ids = list(main_window.target_faces.keys()) # Get current face IDs
         for face_id_key in active_target_face_ids:
             # common_actions.create_parameter_dict_for_face_id handles if face_id already exists
             common_widget_actions.create_parameter_dict_for_face_id(main_window, face_id_key)
-
         # Update control settings
         main_window.control.update(marker_data['control'].copy())
 
 def update_widget_values_from_markers(main_window: 'MainWindow', new_position: int):
     if main_window.markers.get(new_position):
-        if main_window.selected_target_face_id is not None:
-            common_widget_actions.set_widgets_values_using_face_id_parameters(main_window, main_window.selected_target_face_id)
-            common_widget_actions.set_control_widgets_values(main_window, enable_exec_func=False)
+        if main_window.selected_target_face_id is not None: common_widget_actions.set_widgets_values_using_face_id_parameters(main_window, main_window.selected_target_face_id)
+        common_widget_actions.set_control_widgets_values(main_window, enable_exec_func=False)
 
 def on_slider_moved(main_window: 'MainWindow'):
     # print("Called on_slider_moved()")
@@ -653,20 +664,11 @@ def on_slider_released(main_window: 'MainWindow'):
     # print("Called on_slider_released()")
 
     new_position = main_window.videoSeekSlider.value()
+    # print(f"\nSlider released. New position: {new_position}\n")
+    # Perform the update to the new frame
     video_processor = main_window.video_processor
-    
-    # Only process the frame if the read during the seek was successful
-    if not main_window.last_seek_read_failed:
-        if video_processor.media_capture:
-            # print(f"Slider released at {new_position}. Processing current frame.") # Removed print
-            video_processor.process_current_frame()  # Process the current frame
-        # else:
-            # print(f"Slider released at {new_position}. No media capture to process.") # Removed print
-    # else:
-        # print(f"Slider released at {new_position}. Skipping process_current_frame() because last seek read failed.") # Removed print
-
-    # Reset the flag after handling the release event
-    # main_window.last_seek_read_failed = False # Resetting here might be too soon if another event uses it
+    if video_processor.media_capture:
+        video_processor.process_current_frame()  # Process the current frame
 
 def process_swap_faces(main_window: 'MainWindow'):
     video_processor = main_window.video_processor
@@ -686,13 +688,9 @@ def save_current_frame_to_file(main_window: 'MainWindow'):
         return
     frame = main_window.video_processor.current_frame.copy()
     if isinstance(frame, numpy.ndarray):
-        # save_filename, _ = os.path.splitext(main_window.video_processor.media_path)
-        # save_filename, _ = QtWidgets.QFileDialog.getSaveFileName(main_window, 'Save Frame as Image', f'{save_filename}.png', filter='PNG (*.png)',)
         save_filename = misc_helpers.get_output_file_path(main_window.video_processor.media_path, main_window.control['OutputMediaFolder'], media_type='image')
         if save_filename:
             # frame is main_window.video_processor.current_frame, which is already RGB.
-            # Pillow's Image.fromarray expects RGB for 3-channel arrays by default.
-            # Original: pil_image = Image.fromarray(frame[..., ::-1]) # This converted RGB to BGR, then Pillow misinterpreted BGR as RGB.
             pil_image = Image.fromarray(frame) # Correct: Pass RGB frame directly to Pillow.
             pil_image.save(save_filename, 'PNG')
             common_widget_actions.create_and_show_toast_message(main_window, 'Image Saved', f'Saved Current Image to file: {save_filename}')
@@ -700,82 +698,13 @@ def save_current_frame_to_file(main_window: 'MainWindow'):
     else:
         common_widget_actions.create_and_show_messagebox(main_window, 'Invalid Frame', 'Cannot save the current frame!', parent_widget=main_window.saveImageButton)
 
-# --- New functions for Job Start/End Markers ---
+def toggle_live_sound(main_window: 'MainWindow', toggle_value: bool):
+    video_processor = main_window.video_processor
+    was_processing = video_processor.processing
 
-def show_add_marker_menu(main_window: 'MainWindow'):
-    """Shows a context menu for adding different types of markers."""
-    if not main_window.selected_video_button or main_window.selected_video_button.file_type != 'video':
-        common_widget_actions.create_and_show_messagebox(main_window, 'Markers Not Available', 'Markers can only be used for videos!', main_window.videoSeekSlider)
-        return
-
-    button = main_window.addMarkerButton
-    menu = QMenu(main_window)
-
-    # Action for standard marker
-    add_standard_action = menu.addAction("Add Standard Marker")
-    add_standard_action.triggered.connect(lambda: add_video_slider_marker(main_window))
-
-    menu.addSeparator()
-
-    # Determine if the next action should be adding a start or an end marker
-    can_add_start = True
-    can_add_end = False
-    if main_window.job_marker_pairs:
-        last_pair = main_window.job_marker_pairs[-1]
-        if last_pair[1] is None: # Last pair is incomplete (start set, end not set)
-            can_add_start = False
-            can_add_end = True
-
-    # Action for job start marker
-    set_start_action = menu.addAction("Add Record Start Marker")
-    set_start_action.triggered.connect(lambda: set_job_start_frame(main_window))
-    set_start_action.setEnabled(can_add_start)
-
-    # Action for job end marker
-    set_end_action = menu.addAction("Add Record End Marker")
-    set_end_action.triggered.connect(lambda: set_job_end_frame(main_window))
-    set_end_action.setEnabled(can_add_end)
-
-    # Show the menu below the button
-    menu.exec(button.mapToGlobal(QPoint(0, button.height())))
-
-def set_job_start_frame(main_window: 'MainWindow'):
-    """Adds a new job marker pair starting at the current slider position."""
-    current_pos = int(main_window.videoSeekSlider.value())
-
-    # Basic validation: Ensure we are not adding a start if the last pair is incomplete
-    if main_window.job_marker_pairs and main_window.job_marker_pairs[-1][1] is None:
-         QtWidgets.QMessageBox.warning(main_window, "Invalid Action",
-                                     "Cannot add a new Start marker before completing the previous End marker.")
-         return
-
-    # Add the new start marker (end frame is initially None)
-    main_window.job_marker_pairs.append((current_pos, None))
-    main_window.videoSeekSlider.update() # Trigger repaint to show the new marker
-    print(f"Job Start Marker added for pair {len(main_window.job_marker_pairs)} at Frame: {current_pos}")
-
-def set_job_end_frame(main_window: 'MainWindow'):
-    """Sets the job end frame marker for the last incomplete pair."""
-    current_pos = int(main_window.videoSeekSlider.value())
-
-    # Validation: Check if there's an incomplete pair to add an end to
-    if not main_window.job_marker_pairs or main_window.job_marker_pairs[-1][1] is not None:
-        QtWidgets.QMessageBox.critical(main_window, "Error",
-                                     "Cannot set End marker without a preceding Start marker.")
-        return
-
-    last_pair_index = len(main_window.job_marker_pairs) - 1
-    start_frame = main_window.job_marker_pairs[last_pair_index][0]
-
-    # Validation: Check end frame is after start frame
-    if current_pos <= start_frame:
-        QtWidgets.QMessageBox.warning(main_window, "Invalid Position",
-                                    "Job end frame must be after the job start frame.")
-        return
-
-    # Update the last pair with the end frame
-    main_window.job_marker_pairs[last_pair_index] = (start_frame, current_pos)
-    main_window.videoSeekSlider.update() # Trigger repaint to show the new marker
-    print(f"Job End Marker added for pair {last_pair_index + 1} at Frame: {current_pos}")
-
-# --- End of modified functions ---
+    # If the video was playing, then stop and start it again to enable the audio
+    # Otherwise, just the toggle value so that the next time the play button is hit, it would automatically enable/disable the audio
+    # The play button is clicked twice in the below block to simulate the above mentioned behaviour. It should be changed into a set up in the next refactor
+    if was_processing:
+        main_window.buttonMediaPlay.click()
+        main_window.buttonMediaPlay.click()

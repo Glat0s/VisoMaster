@@ -9,8 +9,8 @@ from pyqttoast import Toast, ToastPreset, ToastPosition
 from PySide6 import QtWidgets,QtCore,QtGui
 
 from app.ui.widgets import widget_components
-from app.ui.widgets.common_layout_data import COMMON_LAYOUT_DATA
 from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
+from app.ui.widgets.common_layout_data import COMMON_LAYOUT_DATA 
 import app.helpers.miscellaneous as misc_helpers
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
@@ -370,19 +370,17 @@ def set_control_widgets_values(main_window: 'MainWindow', enable_exec_func = Tru
         for group_name, group_data in layout_data_source.items():
             for widget_key, widget_data in group_data.items():
                 all_widget_options[widget_key] = widget_data
-    
+
     # Iterate through control items and update widgets
     for control_name, control_value in control.items():
         widget = parameter_widgets.get(control_name)
 
         if widget:
-
             # Temporarily disable frame refresh
             widget.enable_refresh_frame = False
 
             # Set the widget value
             widget.set_value(control_value)
-
 
             if enable_exec_func:
                 # Execute any associated function, if defined
@@ -394,7 +392,7 @@ def set_control_widgets_values(main_window: 'MainWindow', enable_exec_func = Tru
                         exec_args_from_layout = widget_definition.get('exec_function_args', []) 
                         final_exec_args = [main_window, control_value] + exec_args_from_layout
                         exec_function_data(*final_exec_args)
-    
+
             # Re-enable frame refresh
             widget.enable_refresh_frame = True
         
@@ -433,7 +431,7 @@ def show_model_loading_dialog(main_window: 'MainWindow'):
                 QtWidgets.QApplication.processEvents()
         main_window._model_loading_timer.timeout.connect(show_dialog)
     # Start or restart the timer
-    main_window._model_loading_timer.start(100)
+    main_window._model_loading_timer.start(300)
 
 @QtCore.Slot()
 def hide_model_loading_dialog(main_window: 'MainWindow'):

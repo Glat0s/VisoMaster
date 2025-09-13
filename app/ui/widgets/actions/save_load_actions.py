@@ -205,12 +205,6 @@ def load_saved_workspace(main_window: 'MainWindow', data_filename: str|bool = Fa
             # Add markers
             video_control_actions.remove_all_markers(main_window)
 
-            # Convert params to ParametersDict
-            if 'markers' in data:
-                data['markers'] = convert_markers_to_supported_type(main_window, data['markers'], misc_helpers.ParametersDict)
-                for marker_position, marker_data in data['markers'].items():
-                    video_control_actions.add_marker(main_window, marker_data['parameters'], marker_data['control'], int(marker_position))
-            
             # Load job marker pairs (New format)
             main_window.job_marker_pairs = data.get('job_marker_pairs', [])
             # Fallback for old format (job_start_frame, job_end_frame)
@@ -218,8 +212,15 @@ def load_saved_workspace(main_window: 'MainWindow', data_filename: str|bool = Fa
                 job_start_frame = data.get('job_start_frame', None)
                 job_end_frame = data.get('job_end_frame', None)
                 if job_start_frame is not None:
-                    # If both exist, create a pair. If only start exists, create an incomplete pair.
-                    main_window.job_marker_pairs.append((job_start_frame, job_end_frame)) 
+                    main_window.job_marker_pairs.append((job_start_frame, job_end_frame))
+
+            # Convert params to ParametersDict
+            data['markers'] = convert_markers_to_supported_type(main_window, data['markers'], misc_helpers.ParametersDict)
+        
+            for marker_position, marker_data in data['markers'].items():
+                video_control_actions.add_marker(main_window, marker_data['parameters'], marker_data['control'], int(marker_position))
+            # main_window.videoSeekSlider.setValue(0)
+            # video_control_actions.update_widget_values_from_markers(main_window, 0)
 
             # Update slider visuals after loading markers
             main_window.videoSeekSlider.update()
@@ -230,23 +231,20 @@ def load_saved_workspace(main_window: 'MainWindow', data_filename: str|bool = Fa
             main_window.loaded_embedding_filename = data.get('loaded_embedding_filename', '')
             common_widget_actions.set_control_widgets_values(main_window)
             # Set output folder
-            common_widget_actions.create_control(main_window, 'OutputMediaFolder', control.get('OutputMediaFolder', '')) # Use .get for safety
-            main_window.outputFolderLineEdit.setText(control.get('OutputMediaFolder', ''))
+            common_widget_actions.create_control(main_window, 'OutputMediaFolder', control['OutputMediaFolder'])
+            main_window.outputFolderLineEdit.setText(control['OutputMediaFolder'])
 
             layout_actions.fit_image_to_view_onchange(main_window)
 
             if main_window.target_faces:
                 list(main_window.target_faces.values())[0].click()
             else:
-                # If no target faces, load current widget parameters or defaults
-                current_widget_params_data = data.get('current_widget_parameters', main_window.default_parameters.copy())
-                main_window.current_widget_parameters = misc_helpers.ParametersDict(current_widget_params_data, main_window.default_parameters)
+                main_window.current_widget_parameters = data.get('current_widget_parameters', main_window.default_parameters.copy())
+                main_window.current_widget_parameters = misc_helpers.ParametersDict(main_window.current_widget_parameters, main_window.default_parameters)
                 common_widget_actions.set_widgets_values_using_face_id_parameters(main_window, face_id=False) 
         
 def save_current_workspace(main_window: 'MainWindow', data_filename:str|bool = False):
-    target_faces_data = {}
-    embeddings_data = {}
-    input_faces_data = {}
+    target_faces_data = {}; embeddings_data = {}; input_faces_data = {}
     target_medias_data = []
 
     # --- Serialize Target Medias ---
@@ -270,18 +268,17 @@ def save_current_workspace(main_window: 'MainWindow', data_filename:str|bool = F
             'cropped_face': target_face.cropped_face.tolist(), 
             'embedding_store': {embed_model: embedding.tolist() for embed_model, embedding in target_face.embedding_store.items()},
             'parameters': main_window.parameters.get(face_id, main_window.default_parameters).data.copy(), # Use .get with default, ensure it's dict
-            'control': main_window.control.copy(), #Store the current control settings. This will be overriden when loading the workspace, if there are markers for the video.
             'assigned_input_faces': list(target_face.assigned_input_faces.keys()),
             'assigned_merged_embeddings': list(target_face.assigned_merged_embeddings.keys()),
             'assigned_input_embedding': {model: emb.tolist() for model, emb in target_face.assigned_input_embedding.items()} # Save calculated embedding
         }
+
     # --- Serialize Embeddings ---
     for embedding_id, embedding_button in main_window.merged_embeddings.items():
         embeddings_data[embedding_id] = {
             'embedding_name': embedding_button.embedding_name,
             'embedding_store': {model: emb.tolist() for model, emb in embedding_button.embedding_store.items()}
         }
-    
     # --- Serialize Markers --- 
     # Convert Parameters inside the markers from ParametersDict to dict before saving
     markers_to_save = convert_markers_to_supported_type(main_window, copy.deepcopy(main_window.markers), dict)
@@ -301,7 +298,6 @@ def save_current_workspace(main_window: 'MainWindow', data_filename:str|bool = F
         'loaded_embedding_filename': main_window.loaded_embedding_filename,
         'current_widget_parameters': main_window.current_widget_parameters.data.copy() # Save as dict
     }
-
     if data_filename is False:
         data_filename, _ = QtWidgets.QFileDialog.getSaveFileName(main_window, filter='JSON (*.json)')
     

@@ -19,6 +19,7 @@ from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import job_manager_actions
+from app.ui.widgets.actions import control_actions
 
 from app.processors.video_processor import VideoProcessor
 from app.processors.models_processor import ModelsProcessor
@@ -30,8 +31,8 @@ from app.ui.widgets.swapper_layout_data import SWAPPER_LAYOUT_DATA
 from app.ui.widgets.settings_layout_data import SETTINGS_LAYOUT_DATA
 from app.ui.widgets.face_editor_layout_data import FACE_EDITOR_LAYOUT_DATA
 from app.helpers.miscellaneous import DFM_MODELS_DATA, ParametersDict
-from app.processors.models_data import models_dir as global_models_dir # For UNet model discovery
 from app.helpers.typing_helper import FacesParametersTypes, ParametersTypes, ControlTypes, MarkerTypes
+from app.processors.models_data import models_dir as global_models_dir # For UNet model discovery
 
 ParametersWidgetTypes = Dict[str, widget_components.ToggleButton|widget_components.SelectionBox|widget_components.ParameterDecimalSlider|widget_components.ParameterSlider|widget_components.ParameterText]
 
@@ -103,15 +104,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.project_root_path = Path(__file__).resolve().parent.parent.parent
         self.actual_models_dir_path = self.project_root_path / global_models_dir
         self.loading_new_media = False
-        # Flag to indicate if the last attempt to read a frame after seeking failed
-        self.last_seek_read_failed = False
 
         self.gpu_memory_update_signal.connect(partial(common_widget_actions.set_gpu_memory_progressbar_value, self))
         self.placeholder_update_signal.connect(partial(common_widget_actions.update_placeholder_visibility, self))
         self.model_loading_signal.connect(partial(common_widget_actions.show_model_loading_dialog, self))
         self.model_loaded_signal.connect(partial(common_widget_actions.hide_model_loading_dialog, self))
         self.display_messagebox_signal.connect(partial(common_widget_actions.create_and_show_messagebox, self))
-
+        self.last_seek_read_failed = False
+        
     def initialize_widgets(self):
         # Initialize QListWidget for target media
         self.targetVideosList.setFlow(QtWidgets.QListWidget.LeftToRight)
@@ -125,6 +125,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         # Set up Menu Actions
         layout_actions.set_up_menu_actions(self)
+
+        # VR180 Adds actionVR180Mode connection
+        self.actionVR180Mode.triggered.connect(self.toggle_vr180_mode)
 
         # Set up placeholder texts in ListWidgets (Target Videos and Input Faces)
         list_view_actions.set_up_list_widget_placeholder(self, self.targetVideosList)
@@ -156,16 +159,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         video_slider_event_filter = VideoSeekSliderEventFilter(self, self.videoSeekSlider)
         self.videoSeekSlider.installEventFilter(video_slider_event_filter)
-        # Audio toggle
-        self.liveSoundButton.toggled.connect(partial(video_control_actions.toggle_live_sound, self))
-
         self.videoSeekSlider.valueChanged.connect(partial(video_control_actions.on_change_video_seek_slider, self))
         self.videoSeekSlider.sliderPressed.connect(partial(video_control_actions.on_slider_pressed, self))
         self.videoSeekSlider.sliderReleased.connect(partial(video_control_actions.on_slider_released, self))
         video_control_actions.set_up_video_seek_slider(self)
         self.frameAdvanceButton.clicked.connect(partial(video_control_actions.advance_video_slider_by_n_frames, self))
+        # Audio toggle
+        self.liveSoundButton.toggled.connect(partial(video_control_actions.toggle_live_sound, self))
+
         self.frameRewindButton.clicked.connect(partial(video_control_actions.rewind_video_slider_by_n_frames, self))
 
+        # JOB MANAGER changes addMarkerButton connection
         self.addMarkerButton.clicked.connect(partial(video_control_actions.show_add_marker_menu, self))
         self.removeMarkerButton.clicked.connect(partial(video_control_actions.remove_video_slider_marker, self))
         self.nextMarkerButton.clicked.connect(partial(video_control_actions.move_slider_to_next_nearest_marker, self))
@@ -176,6 +180,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         video_control_actions.set_up_video_seek_line_edit(self)
         video_seek_line_edit_event_filter = videoSeekSliderLineEditEventFilter(self, self.videoSeekLineEdit)
         self.videoSeekLineEdit.installEventFilter(video_seek_line_edit_event_filter)
+
+        # Audio toggle
+        self.liveSoundButton.toggled.connect(partial(video_control_actions.toggle_live_sound, self))
 
         # Connect the Play/Stop button to the play_video method
         self.buttonMediaPlay.toggled.connect(partial(video_control_actions.play_video, self))
@@ -208,7 +215,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.faceMaskCheckBox.clicked.connect(partial(video_control_actions.process_compare_checkboxes, self))
         self.faceCompareCheckBox.clicked.connect(partial(video_control_actions.process_compare_checkboxes, self))
 
-        # Split COMMON_LAYOUT_DATA processing: 'UNet Denoiser' as control, others as parameter
+        # VR180 splits COMMON_LAYOUT_DATA
         common_parameters_layout_data = {}
         common_controls_layout_data = {}
 
@@ -218,7 +225,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 common_controls_layout_data[group_name] = widgets_in_group
             else: # Other groups like 'Face Restorer' are parameters
                 common_parameters_layout_data[group_name] = widgets_in_group
-
+       
         if common_parameters_layout_data:
             layout_actions.add_widgets_to_tab_layout(self, LAYOUT_DATA=common_parameters_layout_data, layoutWidget=self.commonWidgetsLayout, data_type='parameter')
         if common_controls_layout_data:
@@ -231,17 +238,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Set up output folder select button (It is inside the settings tab Widget)
         self.outputFolderButton.clicked.connect(partial(list_view_actions.select_output_media_folder, self))
         common_widget_actions.create_control(self, 'OutputMediaFolder', '')
-        
+
         # Initialize current_widget_parameters with default values
         self.current_widget_parameters = ParametersDict(copy.deepcopy(self.default_parameters), self.default_parameters)
-
-        # Populate Reference K/V Tensors dropdown (AFTER connecting the signal)
+        self._populate_denoiser_unet_models()
         self._populate_reference_kv_tensors()
-        
+
         # Initialize the button states
         video_control_actions.reset_media_buttons(self)
 
-        # Set GPU Memory Progressbar
+        #Set GPU Memory Progressbar
         font = self.vramProgressBar.font()
         font.setBold(True)
         self.vramProgressBar.setFont(font)
@@ -249,10 +255,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Set face_swap_tab as the default focused tab
         self.tabWidget.setCurrentIndex(0)
         # widget_actions.add_groupbox_and_widgets_from_layout_map(self)
-        
-        # --- Job Manager UI Setup ---
+
         job_manager_actions.setup_job_manager_ui(self)
-        
+
         # Connect Denoiser Mode SelectionBox signals to update visibility
         denoiser_mode_before_combo = self.parameter_widgets.get('DenoiserModeSelectionBefore')
         if denoiser_mode_before_combo:
@@ -285,7 +290,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         Updates visibility of denoiser controls for a specific pass (Before, AfterFirst, After)
         based on the provided current_mode_text.
         """
-        # current_mode = self.control.get(mode_selection_control_name, "Single Step (Fast)") # Old way
         current_mode = current_mode_text # Use the passed text directly
 
         # Define widget names based on the pass_suffix
@@ -318,19 +322,48 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         set_widget_visibility(ddim_steps_widget, is_full_restore_mode)
         set_widget_visibility(cfg_scale_widget, is_full_restore_mode)
 
+    def _populate_denoiser_unet_models(self):
+        unet_model_files = []
+        # default_unet_model = "ref_ldm_unet_real_refs_n1.onnx" # Prioritize based on existence and sorting later
+
+        if os.path.exists(global_models_dir):
+            for f_name in os.listdir(global_models_dir):
+                if f_name.startswith("ref_ldm_unet_") and f_name.endswith(".onnx"):
+                    unet_model_files.append(f_name)
+        
+        # Ensure the default model is in the list if it exists, and prioritize it
+        unet_model_files.sort() # Sort alphabetically for consistent order
+
+        denoiser_model_widget = self.parameter_widgets.get("DenoiserUNetModelSelection")
+        if denoiser_model_widget and isinstance(denoiser_model_widget, widget_components.SelectionBox):
+            current_selection_in_control = self.control.get("DenoiserUNetModelSelection")
+            denoiser_model_widget.clear()
+
+            if unet_model_files:
+                denoiser_model_widget.addItems(unet_model_files)
+                
+                # If a previous selection exists and is still valid, keep it. Otherwise, pick the first.
+                if not current_selection_in_control or current_selection_in_control not in unet_model_files:
+                    new_selection = unet_model_files[0]
+                    self.control["DenoiserUNetModelSelection"] = new_selection
+                    denoiser_model_widget.setCurrentText(new_selection)
+                else:
+                    denoiser_model_widget.setCurrentText(current_selection_in_control)
+            else:
+                denoiser_model_widget.addItem("No UNet models found")
+                self.control["DenoiserUNetModelSelection"] = "" # No model selected
+                denoiser_model_widget.setCurrentText("No UNet models found")
+
     def _populate_reference_kv_tensors(self):
         kv_tensor_files = []
-        # Define the directory for K/V tensor files
-        # global_models_dir points to 'model_assets'
         kv_tensors_dir = os.path.join(global_models_dir, "reference_kv_data")
 
         if os.path.exists(kv_tensors_dir):
             for f_name in os.listdir(kv_tensors_dir):
-                kv_tensor_files.append(f_name)
+                if f_name.endswith(".pt"): kv_tensor_files.append(f_name)
         
-        kv_tensor_files.sort() # Sort alphabetically for consistent order
+        kv_tensor_files.sort()
 
-        # Assuming the widget control name is 'ReferenceKVTensorsSelection'
         kv_tensor_widget = self.parameter_widgets.get("ReferenceKVTensorsSelection")
         if kv_tensor_widget and isinstance(kv_tensor_widget, widget_components.SelectionBox):
             current_selection_in_control = self.control.get("ReferenceKVTensorsSelection")
@@ -347,55 +380,38 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                     kv_tensor_widget.setCurrentText(current_selection_in_control)
             else:
                 kv_tensor_widget.addItem("No K/V Tensors found")
-                self.control["ReferenceKVTensorsSelection"] = "" # No file selected
+                self.control["ReferenceKVTensorsSelection"] = ""
                 kv_tensor_widget.setCurrentText("No K/V Tensors found")
-    
-    def handle_reference_kv_file_change(self, new_kv_file_name: str): 
 
-        with self.models_processor.model_lock: # Protect access to shared K/V map attributes
-            # Always try to unload/load
+    def handle_reference_kv_file_change(self, new_kv_file_name: str): 
+        with self.models_processor.model_lock:
             self.current_kv_tensors_map = None 
-            
             self.control['ReferenceKVTensorsSelection'] = new_kv_file_name 
-            self.previous_kv_file_selection = new_kv_file_name # Update this under lock
-            
+            self.previous_kv_file_selection = new_kv_file_name
             if new_kv_file_name and new_kv_file_name != "No K/V tensor files found":
-                # Use the robustly calculated path
                 kv_file_path = self.actual_models_dir_path / "reference_kv_data" / new_kv_file_name
                 if kv_file_path.exists():
                     try:
                         self.model_loading_signal.emit() 
-                        kv_payload = torch.load(kv_file_path, map_location='cpu', weights_only=False) 
+                        kv_payload = torch.load(kv_file_path, map_location='cpu', weights_only=True) 
                         self.current_kv_tensors_map = kv_payload.get("kv_map")
-                        if self.current_kv_tensors_map:
-                            print(f"Successfully loaded K/V map from {new_kv_file_name} for {len(self.current_kv_tensors_map)} layers.")
-                        else:
-                            print(f"Warning: 'kv_map' not found in {new_kv_file_name}.")
-                            self.current_kv_tensors_map = None
+                        if self.current_kv_tensors_map: print(f"Successfully loaded K/V map from {new_kv_file_name} for {len(self.current_kv_tensors_map)} layers.")
+                        else: print(f"Warning: 'kv_map' not found in {new_kv_file_name}."); self.current_kv_tensors_map = None
                         self.model_loaded_signal.emit() 
                     except Exception as e:
                         print(f"Error loading K/V tensor file {kv_file_path}: {e}")
                         self.current_kv_tensors_map = None
-                    self.model_loaded_signal.emit() 
-                else:
-                    print(f"K/V tensor file not found: {kv_file_path}")
-                    self.current_kv_tensors_map = None
-            else:
-                self.current_kv_tensors_map = None
+                        self.model_loaded_signal.emit()
+                else: print(f"K/V tensor file not found: {kv_file_path}"); self.current_kv_tensors_map = None
+            else: self.current_kv_tensors_map = None
 
-        # Frame refresh logic (outside the lock)
         denoiser_enabled_before = self.control.get('DenoiserUNetEnableBeforeRestorersToggle', False)
-        denoiser_enabled_after_first = self.control.get('DenoiserAfterFirstRestorersToggle', False)
+        denoiser_enabled_after_first = self.control.get('DenoiserAfterFirstRestorerToggle', False)
         denoiser_enabled_after = self.control.get('DenoiserAfterRestorersToggle', False)
 
-        # Refresh frame if any denoiser is active and K/V selection might have changed its state
         if (denoiser_enabled_before or denoiser_enabled_after_first or denoiser_enabled_after):
-            # Trigger refresh if a K/V file was selected/deselected,
-            # as this affects whether kv_tensor_map_for_this_run will be None or populated.
-            if new_kv_file_name: # True if a file is selected or "No K/V..." is chosen (i.e., selection changed)
-                common_widget_actions.refresh_frame(self)
-        
-        
+            if new_kv_file_name: common_widget_actions.refresh_frame(self)
+
     def __init__(self):
         super(MainWindow, self).__init__()
         self.setupUi(self)
@@ -444,6 +460,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             case QtCore.Qt.Key_S:
                 self.swapfacesButton.click()
 
+    def toggle_vr180_mode(self):
+        self.control['VR180ModeEnableToggle'] = self.actionVR180Mode.isChecked()
+        # Potentially refresh frame or update UI state if needed
+        common_widget_actions.refresh_frame(self)
+
     def closeEvent(self, event):
         print("MainWindow: closeEvent called.")
 
@@ -460,6 +481,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         if Path('last_workspace.json').is_file():
             load_dialog = widget_components.LoadLastWorkspaceDialog(self)
             load_dialog.exec_()
+            if self.control.get('VR180ModeEnableToggle', False): self.actionVR180Mode.setChecked(True)
+            else: self.actionVR180Mode.setChecked(False)
+            # Re-populate and set current selection for dynamic widgets like DenoiserUNetModelSelection
+            self._populate_denoiser_unet_models()
             self._populate_reference_kv_tensors()
 
     def save_last_workspace(self):

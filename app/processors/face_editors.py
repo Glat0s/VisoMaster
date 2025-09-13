@@ -6,10 +6,11 @@ import torch
 import numpy as np
 from torch.cuda import nvtx
 
+import torch.nn.functional
+from collections import defaultdict
+
 from torchvision import transforms
 from torchvision.transforms import v2
-
-import torch.nn.functional
 
 from app.processors.models_data import models_dir
 from app.processors.utils import faceutil
@@ -35,8 +36,8 @@ class FaceEditors:
         kp_info = {}
         with torch.no_grad():
             # We force to use TensorRT because it doesn't work well in trt
-            if self.models_processor.provider_name == "TensorRT-Engine" or self.models_processor.provider_name == "TensorRT":
-            #if self.models_processor.provider_name == "!TensorRT-Engine":
+            #if self.models_processor.provider_name == "TensorRT-Engine":
+            if self.models_processor.provider_name == "!TensorRT-Engine":
                 if face_editor_type == 'Human-Face':
                     if not self.models_processor.models_trt['LivePortraitMotionExtractor']:
                         self.models_processor.models_trt['LivePortraitMotionExtractor'] = self.models_processor.load_model_trt('LivePortraitMotionExtractor', custom_plugin_path=None, precision="fp32")
@@ -54,9 +55,9 @@ class FaceEditors:
 
                 feed_dict = {}
                 feed_dict["img"] = I_s
-                stream = torch.cuda.current_stream()
-                preds_dict = motion_extractor_model.predict_async(feed_dict, stream)
-                #preds_dict = motion_extractor_model.predict_async(feed_dict, torch.cuda.current_stream())
+                #stream = torch.cuda.Stream()
+                #preds_dict = motion_extractor_model.predict_async(feed_dict, stream)
+                preds_dict = motion_extractor_model.predict_async(feed_dict, torch.cuda.current_stream())
                 #preds_dict = motion_extractor_model.predict(feed_dict)
 
                 kp_info = {
@@ -131,8 +132,8 @@ class FaceEditors:
     def lp_appearance_feature_extractor(self, img, face_editor_type='Human-Face'):
         with torch.no_grad():
             # We force to use TensorRT. 
-            if self.models_processor.provider_name == "TensorRT-Engine" or self.models_processor.provider_name == "TensorRT":
-            #if self.models_processor.provider_name == "!TensorRT-Engine":
+            #if self.models_processor.provider_name == "TensorRT-Engine":
+            if self.models_processor.provider_name == "!TensorRT-Engine":
                 if face_editor_type == 'Human-Face':
                     if not self.models_processor.models_trt['LivePortraitAppearanceFeatureExtractor']:
                         self.models_processor.models_trt['LivePortraitAppearanceFeatureExtractor'] = self.models_processor.load_model_trt('LivePortraitAppearanceFeatureExtractor', custom_plugin_path=None, precision="fp16")
@@ -148,9 +149,7 @@ class FaceEditors:
 
                 feed_dict = {}
                 feed_dict["img"] = I_s
-                stream = torch.cuda.current_stream()
-                preds_dict = appearance_feature_extractor_model.predict_async(feed_dict, stream)
-                #preds_dict = appearance_feature_extractor_model.predict_async(feed_dict, torch.cuda.current_stream())
+                preds_dict = appearance_feature_extractor_model.predict_async(feed_dict, torch.cuda.current_stream())
                 #preds_dict = appearance_feature_extractor_model.predict(feed_dict)
 
                 output = preds_dict["output"]
@@ -191,8 +190,8 @@ class FaceEditors:
         """
         with torch.no_grad():
             # We force to use TensorRT. 
-            if self.models_processor.provider_name == "TensorRT-Engine" or self.models_processor.provider_name == "TensorRT":
-            #if self.models_processor.provider_name == "!TensorRT-Engine":
+            #if self.models_processor.provider_name == "TensorRT-Engine":
+            if self.models_processor.provider_name == "!TensorRT-Engine":
                 if face_editor_type == 'Human-Face':
                     if not self.models_processor.models_trt['LivePortraitStitchingEye']:
                         self.models_processor.models_trt['LivePortraitStitchingEye'] = self.models_processor.load_model_trt('LivePortraitStitchingEye', custom_plugin_path=None, precision="fp16")
@@ -205,9 +204,7 @@ class FaceEditors:
 
                 feed_dict = {}
                 feed_dict["input"] = feat_eye
-                stream = torch.cuda.current_stream()
-                preds_dict = stitching_eye_model.predict_async(feed_dict, stream)
-                #preds_dict = stitching_eye_model.predict_async(feed_dict, torch.cuda.current_stream())
+                preds_dict = stitching_eye_model.predict_async(feed_dict, torch.cuda.current_stream())
                 #preds_dict = stitching_eye_model.predict(feed_dict)
 
                 delta = preds_dict["output"]
@@ -244,8 +241,8 @@ class FaceEditors:
         """
         with torch.no_grad():
             # We force to use TensorRT. 
-            if self.models_processor.provider_name == "TensorRT-Engine" or self.models_processor.provider_name == "TensorRT":
-            #if self.models_processor.provider_name == "!TensorRT-Engine":
+            #if self.models_processor.provider_name == "TensorRT-Engine":
+            if self.models_processor.provider_name == "!TensorRT-Engine":
                 if face_editor_type == 'Human-Face':
                     if not self.models_processor.models_trt['LivePortraitStitchingLip']:
                         self.models_processor.models_trt['LivePortraitStitchingLip'] = self.models_processor.load_model_trt('LivePortraitStitchingLip', custom_plugin_path=None, precision="fp16")
@@ -258,9 +255,7 @@ class FaceEditors:
 
                 feed_dict = {}
                 feed_dict["input"] = feat_lip
-                stream = torch.cuda.current_stream()
-                preds_dict = stitching_lip_model.predict_async(feed_dict, stream)
-                #preds_dict = stitching_lip_model.predict_async(feed_dict, torch.cuda.current_stream())
+                preds_dict = stitching_lip_model.predict_async(feed_dict, torch.cuda.current_stream())
                 #preds_dict = stitching_lip_model.predict(feed_dict)
 
                 delta = preds_dict["output"]
@@ -297,8 +292,8 @@ class FaceEditors:
         """
         with torch.no_grad():
             # We force to use TensorRT. 
-            if self.models_processor.provider_name == "TensorRT-Engine" or self.models_processor.provider_name == "TensorRT":
-            #if self.models_processor.provider_name == "!TensorRT-Engine":
+            #if self.models_processor.provider_name == "TensorRT-Engine":
+            if self.models_processor.provider_name == "!TensorRT-Engine":
                 if face_editor_type == 'Human-Face':
                     if not self.models_processor.models_trt['LivePortraitStitching']:
                         self.models_processor.models_trt['LivePortraitStitching'] = self.models_processor.load_model_trt('LivePortraitStitching', custom_plugin_path=None, precision="fp16")
@@ -311,9 +306,7 @@ class FaceEditors:
 
                 feed_dict = {}
                 feed_dict["input"] = feat_stiching
-                stream = torch.cuda.current_stream()
-                preds_dict = stitching_model.predict_async(feed_dict, stream)
-                #preds_dict = stitching_model.predict_async(feed_dict, torch.cuda.current_stream())
+                preds_dict = stitching_model.predict_async(feed_dict, torch.cuda.current_stream())
                 #preds_dict = stitching_model.predict(feed_dict)
 
                 delta = preds_dict["output"]
@@ -387,7 +380,6 @@ class FaceEditors:
         kp_driving_new += delta_exp_diff
         kp_driving_new[..., :2] += delta_tx_ty_diff
 
-
         return kp_driving_new
 
     def lp_warp_decode(self, feature_3d: torch.Tensor, kp_source: torch.Tensor, kp_driving: torch.Tensor, face_editor_type='Human-Face') -> torch.Tensor:
@@ -398,9 +390,7 @@ class FaceEditors:
         """
 
         with torch.no_grad():
-            # We force to use TensorRT. 
-            if self.models_processor.provider_name == "TensorRT-Engine" or self.models_processor.provider_name == "TensorRT":
-            #if self.models_processor.provider_name == "TensorRT-Engine":
+            if self.models_processor.provider_name == "TensorRT-Engine":
                 if face_editor_type == 'Human-Face':
                     if not self.models_processor.models_trt['LivePortraitWarpingSpadeFix']:
                         if SYSTEM_PLATFORM == 'Windows':
@@ -424,7 +414,7 @@ class FaceEditors:
                 feed_dict["feature_3d"] = feature_3d
                 feed_dict["kp_source"] = kp_source
                 feed_dict["kp_driving"] = kp_driving
-                stream = torch.cuda.current_stream()
+                stream = torch.cuda.Stream()
                 preds_dict = warping_spade_model.predict_async(feed_dict, stream)
                 #preds_dict = warping_spade_model.predict_async(feed_dict, torch.cuda.current_stream())
                 #preds_dict = warping_spade_model.predict(feed_dict)
@@ -503,6 +493,7 @@ class FaceEditors:
 
     def apply_face_makeup(self, img, parameters):
         # atts = [1 'skin', 2 'l_brow', 3 'r_brow', 4 'l_eye', 5 'r_eye', 6 'eye_g', 7 'l_ear', 8 'r_ear', 9 'ear_r', 10 'nose', 11 'mouth', 12 'u_lip', 13 'l_lip', 14 'neck', 15 'neck_l', 16 'cloth', 17 'hair', 18 'hat']
+
         # Normalize the image and perform parsing
         temp = torch.div(img, 255)
         temp = v2.functional.normalize(temp, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
@@ -524,14 +515,14 @@ class FaceEditors:
             out = self.face_parser_makeup_direct_rgb(img=out, parsing=outpred, part=(1, 7, 8, 10), color=color, blend_factor=parameters['FaceMakeupBlendAmountDecimalSlider'])
         
         if parameters['EyesMakeupEnableToggle']:
-            #print("eyes")
+            print("eyes")
             color = [parameters['EyesMakeupRedSlider'], parameters['EyesMakeupGreenSlider'], parameters['EyesMakeupBlueSlider']]
             
             # Ausgangsmaske für Augen (Labels 4 & 5)
             eye_mask = (outpred == 4) | (outpred == 5)  # shape: (512, 512)
-            #print("outpred, eye_mask_pre (512,512): ", outpred.shape, eye_mask.shape)
+            print("outpred, eye_mask_pre (512,512): ", outpred.shape, eye_mask.shape)
             eye_mask = eye_mask.unsqueeze(0).unsqueeze(0).float()  # shape: (1, 1, H, W)
-            #print("eye_mask_post (1,1,H,W): ", eye_mask.shape)
+            print("eye_mask_post (1,1,H,W): ", eye_mask.shape)
 
             # Pupille isolieren: erzeuge kleinere zentrale Maske mit max_pool2d
             pupil_mask = 1 - torch.nn.functional.max_pool2d(1 - eye_mask, kernel_size=5, stride=1, padding=2)

@@ -34,16 +34,31 @@ class ParametersDict(UserDict):
             self.__setitem__(key, self._default_parameters[key])
             return self._default_parameters[key]     
 
-def get_scaling_transforms():
-    t512 = v2.Resize((512, 512), interpolation=v2.InterpolationMode.BILINEAR, antialias=False)
-    t384 = v2.Resize((384, 384), interpolation=v2.InterpolationMode.BILINEAR, antialias=False)
-    t256 = v2.Resize((256, 256), interpolation=v2.InterpolationMode.BILINEAR, antialias=False)
-    t128 = v2.Resize((128, 128), interpolation=v2.InterpolationMode.BILINEAR, antialias=False)
-    t256_face = v2.Resize((256, 256), interpolation=v2.InterpolationMode.BILINEAR, antialias=False)
+def get_scaling_transforms(control_params):
+    interpolation_map = {
+        'NEAREST': v2.InterpolationMode.NEAREST,
+        'BILINEAR': v2.InterpolationMode.BILINEAR,
+        'BICUBIC': v2.InterpolationMode.BICUBIC
+    }
+    interpolation_get_cropped_face_kps = interpolation_map.get(control_params.get("get_cropped_face_kpsTypeSelection", "BILINEAR"))
+    interpolation_original_face_128_384 = interpolation_map.get(control_params.get("original_face_128_384TypeSelection", "BILINEAR"))
+    interpolation_original_face_512 = interpolation_map.get(control_params.get("original_face_512TypeSelection", "BILINEAR"))
+    interpolation_Untransform = interpolation_map.get(control_params.get("UntransformTypeSelection", "BILINEAR"))
+    interpolation_expression_faceeditor_t256 = interpolation_map.get(control_params.get("expression_faceeditor_t256TypeSelection", "BILINEAR"))
+    interpolation_expression_faceeditor_back = interpolation_map.get(control_params.get("expression_faceeditor_backTypeSelection", "BILINEAR"))
+    
+    interpolation_block_shift_map = {'NEAREST': 'nearest', 'BILINEAR': 'bilinear', 'BICUBIC': 'bicubic'}
+    interpolation_block_shift = interpolation_block_shift_map.get(control_params.get("block_shiftTypeSelection", "NEAREST"))
+    
+    antialias_method = control_params.get("AntialiasTypeSelection", "False") == 'True'
 
-    return t512, t384, t256, t128, t256_face
-
-t512, t384, t256, t128, t256_face = get_scaling_transforms()
+    t256_face = v2.Resize((256, 256), interpolation=interpolation_expression_faceeditor_t256, antialias=antialias_method)
+    t512 = v2.Resize((512, 512), interpolation=interpolation_original_face_512, antialias=antialias_method)
+    t384 = v2.Resize((384, 384), interpolation=interpolation_original_face_128_384, antialias=antialias_method)
+    t256 = v2.Resize((256, 256), interpolation=interpolation_original_face_128_384, antialias=antialias_method)
+    t128 = v2.Resize((128, 128), interpolation=interpolation_original_face_128_384, antialias=antialias_method)
+    
+    return t512, t384, t256, t128, interpolation_get_cropped_face_kps, interpolation_original_face_128_384, interpolation_original_face_512, interpolation_Untransform, t256_face, interpolation_expression_faceeditor_back, interpolation_block_shift
 
 def absoluteFilePaths(directory: str, include_subfolders=False):
     if include_subfolders:
@@ -210,8 +225,8 @@ def read_image_file(image_path):
 def get_output_file_path(original_media_path, output_folder, media_type='video', job_name=None, use_job_name_for_output=False, output_file_name=None):
     date_and_time = datetime.now().strftime(r'%Y_%m_%d_%H_%M_%S')
     input_filename = os.path.basename(original_media_path)
-    # Create a temp Path object to split and merge the original filename to get the new output filename
     temp_path = Path(input_filename)
+    
     output_base_name = None
     # Priority 1: Use specific output_file_name if provided and checkbox is unchecked
     if not use_job_name_for_output and output_file_name:

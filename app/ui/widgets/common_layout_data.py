@@ -3,6 +3,24 @@ import app.ui.widgets.actions.layout_actions as layout_actions
 import app.ui.widgets.actions.control_actions as control_actions
 
 COMMON_LAYOUT_DATA: LayoutDictTypes = {
+    # 'Face Compare':{
+    #     'ViewFaceMaskEnableToggle':{
+    #         'level': 1,
+    #         'label': 'View Face Mask',
+    #         'default': False,
+    #         'help': 'Show Face Mask',
+    #         'exec_function': layout_actions.fit_image_to_view_onchange,
+    #         'exec_function_args': [],
+    #     },
+    #     'ViewFaceCompareEnableToggle':{
+    #         'level': 1,
+    #         'label': 'View Face Compare',
+    #         'default': False,
+    #         'help': 'Show Face Compare',
+    #         'exec_function': layout_actions.fit_image_to_view_onchange,
+    #         'exec_function_args': [],
+    #     },
+    # },
     'Face Restorer': {
         'FaceRestorerEnableToggle': {
             'level': 1,
@@ -13,8 +31,8 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
         'FaceRestorerTypeSelection': {
             'level': 2,
             'label': 'Restorer Type',
-            'options': ['GFPGAN-v1.4','GFPGAN-1024', 'GPEN-256', 'GPEN-512', 'GPEN-1024', 'GPEN-2048'],
-            'default': 'GFPGAN-1024',
+            'options': ['GFPGAN-v1.4','GFPGAN-1024', 'CodeFormer', 'GPEN-256', 'GPEN-512', 'GPEN-1024', 'GPEN-2048', 'RestoreFormer++', 'VQFR-v2'],
+            'default': 'GFPGAN-v1.4',
             'parentToggle': 'FaceRestorerEnableToggle',
             'requiredToggleValue': True,
             'help': 'Select the model type for face restoration.'
@@ -27,6 +45,18 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'parentToggle': 'FaceRestorerEnableToggle',
             'requiredToggleValue': True,
             'help': 'Select the alignment method for restoring the face to its original or blended position.'
+        },
+        'FaceFidelityWeightDecimalSlider': {
+            'level': 2,
+            'label': 'Fidelity Weight',
+            'min_value': '0.0',
+            'max_value': '1.0',
+            'default': '0.9',
+            'decimals': 1,
+            'step': 0.1,
+            'parentToggle': 'FaceRestorerEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Adjust the fidelity weight to control how closely the restoration preserves the original face details.'
         },
         'FaceRestorerBlendSlider': {
             'level': 2,
@@ -57,7 +87,7 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'parentToggle': 'FaceRestorerAutoEnableToggle',
             'requiredToggleValue': True,
             'help': 'Adjust sharp calc. mostly needed for over 0, which makes the swap sharper. depends on swap model, restorer model, resolution, face size,...'
-        },
+        },        
         'FaceRestorerEnable2Toggle': {
             'level': 1,
             'label': 'Enable Face Restorer 2',
@@ -67,8 +97,8 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
         'FaceRestorerType2Selection': {
             'level': 2,
             'label': 'Restorer Type',
-            'options': ['GFPGAN-v1.4', 'GFPGAN-1024', 'GPEN-256', 'GPEN-512', 'GPEN-1024', 'GPEN-2048'],
-            'default': 'GPEN-2048',
+            'options': ['GFPGAN-v1.4', 'GFPGAN-1024', 'CodeFormer', 'GPEN-256', 'GPEN-512', 'GPEN-1024', 'GPEN-2048', 'RestoreFormer++', 'VQFR-v2'],
+            'default': 'GFPGAN-v1.4',
             'parentToggle': 'FaceRestorerEnable2Toggle',
             'requiredToggleValue': True,
             'help': 'Select the model type for face restoration.'
@@ -82,6 +112,18 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'requiredToggleValue': True,
             'help': 'Select the alignment method for restoring the face to its original or blended position.'
         },
+        'FaceFidelityWeight2DecimalSlider': {
+            'level': 2,
+            'label': 'Fidelity Weight',
+            'min_value': '0.0',
+            'max_value': '1.0',
+            'default': '0.9',
+            'decimals': 1,
+            'step': 0.1,
+            'parentToggle': 'FaceRestorerEnable2Toggle',
+            'requiredToggleValue': True,
+            'help': 'Adjust the fidelity weight to control how closely the restoration preserves the original face details.'
+        },
         'FaceRestorerBlend2Slider': {
             'level': 2,
             'label': 'Blend',
@@ -93,195 +135,117 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'requiredToggleValue': True,
             'help': 'Control the blend ratio between the restored face and the swapped face.'
         },
-        'FaceRestorerAutoEnable2Toggle': {
-            'level': 2,
-            'label': 'Auto Restore2',
-            'default': False,
-            'parentToggle': 'FaceRestorerEnable2Toggle',
-            'requiredToggleValue': True,
-            'help': 'Auto Adjust Restorer2 Blend Amount'
-        },
-        'FaceRestorerAutoSharpAdjust2Slider': {
-            'level': 3,
-            'label': 'adjust sharpness',
-            'min_value': '-60',
-            'max_value': '60',
-            'default': '0',
-            'step': 1,
-            'parentToggle': 'FaceRestorerAutoEnable2Toggle',
-            'requiredToggleValue': True,
-            'help': 'Adjust sharp calc. mostly needed for over 0, which makes the swap sharper. depends on swap model, restorer model, resolution, face size,...'
-        },
-        'FaceExpressionEnableToggleBoth': {
+        'FaceExpressionEnableToggle': {
             'level': 1,
             'label': 'Enable Face Expression Restorer',
             'default': False,
             'help': 'Enabled the use of the LivePortrait face expression model to restore facial expressions after swapping.'
         },
-        'FaceExpressionRelativeToggle': {
-            'level': 2,
-            'label': 'Relative',
-            'default': False,
-            'parentToggle': 'FaceExpressionEnableToggleBoth',
-            'requiredToggleValue': True,
-            'help': 'Makes the animation relative to the initial pose of the source image. Can be better for a more natural look.'
-        },
-        'FaceExpressionCropScaleDecimalSliderBoth': {
+        'FaceExpressionCropScaleDecimalSlider': {
             'level': 2,
             'label': 'Crop Scale',
-            'min_value': '2.0',
-            'max_value': '3.0',
-            'default': '2.5',
-            'step': 0.1,
-            'decimals': 1,
-            'parentToggle': 'FaceExpressionEnableToggleBoth',
+            'min_value': '1.80',
+            'max_value': '3.00',
+            'default': '2.30',
+            'step': 0.05,
+            'decimals': 2,
+            'parentToggle': 'FaceExpressionEnableToggle',
             'requiredToggleValue': True,
             'help': 'Changes swap crop scale. Increase the value to capture the face more distantly.'
         },
-        'FaceExpressionVYRatioDecimalSliderBoth': {
+        'FaceExpressionVYRatioDecimalSlider': {
             'level': 2,
             'label': 'VY Ratio',
             'min_value': '-0.125',
             'max_value': '-0.100',
-            'default': '-0.100',
+            'default': '-0.125',
             'step': 0.001,
             'decimals': 3,
-            'parentToggle': 'FaceExpressionEnableToggleBoth',
+            'parentToggle': 'FaceExpressionEnableToggle',
             'requiredToggleValue': True,
             'help': 'Changes the vy ratio for crop scale. Increase the value to capture the face more distantly.'
         },
-        'FaceExpressionEyesToggle': {
+        'FaceExpressionFriendlyFactorDecimalSlider': {
             'level': 2,
-            'label': 'Restore the eyes',
-            'default': False,
-            'parentToggle': 'FaceExpressionEnableToggleBoth',
-            'requiredToggleValue': True,
-            'help': 'Activate the eyes face expression restorer'
-        },
-        'FaceExpressionFriendlyFactorDecimalSliderEyes': {
-            'level': 3,
-            'label': 'Expression Friendly Factor Eyes',
+            'label': 'Expression Friendly Factor',
             'min_value': '0.0',
-            'max_value': '2.0',
+            'max_value': '1.0',
             'default': '1.0',
             'decimals': 1,
             'step': 0.1,
-            'parentToggle': 'FaceExpressionEnableToggleBoth & FaceExpressionEyesToggle',
+            'parentToggle': 'FaceExpressionEnableToggle',
             'requiredToggleValue': True,
-            'help': 'Control the expression similarity between the driving face and the swapped face of the eyes.'
+            'help': 'Control the expression similarity between the driving face and the swapped face.'
         },
-        'FaceExpressionRetargetingEyesEnableToggleBoth': {
-            'level': 3,
-            'label': 'Retargeting Eyes',
-            'default': False,
-            'parentToggle': 'FaceExpressionEnableToggleBoth & FaceExpressionEyesToggle',
-            'requiredToggleValue': True,
-            'help': 'Adjusting or redirecting the gaze or movement of the eyes during the facial restoration process.'
-        },
-        'FaceExpressionRetargetingEyesMultiplierDecimalSliderBoth': {
-            'level': 4,
-            'label': 'Retargeting Eyes Multiplier',
-            'min_value': '0.0',
-            'max_value': '2.0',
-            'default': '1.0',
-            'decimals': 1,
-            'step': 0.1,
-            'parentToggle': 'FaceExpressionRetargetingEyesEnableToggleBoth & FaceExpressionEnableToggleBoth & FaceExpressionEyesToggle',
-            'requiredToggleValue': True,
-            'help': 'Multiplier value for Retargeting Eyes.'
-        },
-        'FaceExpressionNormalizeEyesEnableToggleBoth': {
-            'level': 4,
-            'label': 'Normalize Eyes',
-            'default': True,
-            'parentToggle': 'FaceExpressionEnableToggleBoth & FaceExpressionEyesToggle & FaceExpressionRetargetingEyesEnableToggleBoth',
-            'requiredToggleValue': True,
-            'help': 'Normalize the Eyes during the facial restoration process.'
-        },
-        'FaceExpressionNormalizeEyesThresholdDecimalSliderBoth': {
-            'level': 5,
-            'label': 'Normalize Eyes Threshold',
-            'min_value': '0.10',
-            'max_value': '1.00',
-            'default': '0.40',
-            'decimals': 2,
-            'step': 0.01,
-            'parentToggle': 'FaceExpressionNormalizeEyesEnableToggleBoth & FaceExpressionEnableToggleBoth & FaceExpressionEyesToggle & FaceExpressionRetargetingEyesEnableToggleBoth',
-            'requiredToggleValue': True,
-            'help': 'Threshold for the eye open ratio, it will dictate at wich open/close ratio it uses the modified faceutil function.'
-        },     
-        'FaceExpressionNormalizeEyesMaxDecimalSliderBoth': {
-            'level': 5,
-            'label': 'Max eye open ratio',
-            'min_value': '0.00',
-            'max_value': '1.00',
-            'default': '0.50',
-            'decimals': 2,
-            'step': 0.01,
-            'parentToggle': 'FaceExpressionNormalizeEyesEnableToggleBoth & FaceExpressionEnableToggleBoth & FaceExpressionEyesToggle & FaceExpressionRetargetingEyesEnableToggleBoth',
-            'requiredToggleValue': True,
-            'help': 'Max eye open ratio that the target will have (<0.5 is best).'
-        },     
-        'FaceExpressionLipsToggle': {
+        'FaceExpressionAnimationRegionSelection': {
             'level': 2,
-            'label': 'Restore the lips',
-            'default': False,
-            'parentToggle': 'FaceExpressionEnableToggleBoth',
+            'label': 'Animation Region',
+            'options': ['all', 'eyes', 'lips'],
+            'default': 'all',
+            'parentToggle': 'FaceExpressionEnableToggle',
             'requiredToggleValue': True,
-            'help': 'Activate the lips face expression restorer'
+            'help': 'The facial region involved in the restoration process.'
         },
-        'FaceExpressionFriendlyFactorDecimalSliderLips': {
-            'level': 3,
-            'label': 'Expression Friendly Factor Lips',
-            'min_value': '0.0',
-            'max_value': '2.0',
-            'default': '1.0',
-            'decimals': 1,
-            'step': 0.1,
-            'parentToggle': 'FaceExpressionEnableToggleBoth & FaceExpressionLipsToggle',
-            'requiredToggleValue': True,
-            'help': 'Control the expression similarity between the driving face and the swapped face of the lips.'
-        },
-        'FaceExpressionRetargetingLipsEnableToggleBoth': {
-            'level': 3,
-            'label': 'Retargeting Lips',
-            'default': False,
-            'parentToggle': 'FaceExpressionEnableToggleBoth & FaceExpressionLipsToggle',
-            'requiredToggleValue': True,
-            'help': 'Adjusting or modifying the position, shape, or movement of the lips during the facial restoration process.'
-        },
-        'FaceExpressionRetargetingLipsMultiplierDecimalSliderBoth': {
-            'level': 4,
-            'label': 'Retargeting Lips Multiplier',
-            'min_value': '0.0',
-            'max_value': '2.0',
-            'default': '1.0',
-            'decimals': 1,
-            'step': 0.1,
-            'parentToggle': 'FaceExpressionRetargetingLipsEnableToggleBoth & FaceExpressionEnableToggleBoth & FaceExpressionLipsToggle',
-            'requiredToggleValue': True,
-            'help': 'Multiplier value for Retargeting Lips.'
-        },
-        'FaceExpressionNormalizeLipsEnableToggleBoth': {
-            'level': 3,
+        'FaceExpressionNormalizeLipsEnableToggle': {
+            'level': 2,
             'label': 'Normalize Lips',
-            'default': False,
-            'parentToggle': 'FaceExpressionEnableToggleBoth & FaceExpressionLipsToggle',
+            'default': True,
+            'parentToggle': 'FaceExpressionEnableToggle',
             'requiredToggleValue': True,
             'help': 'Normalize the lips during the facial restoration process.'
         },
-        'FaceExpressionNormalizeLipsThresholdDecimalSliderBoth': {
-            'level': 4,
+        'FaceExpressionNormalizeLipsThresholdDecimalSlider': {
+            'level': 3,
             'label': 'Normalize Lips Threshold',
             'min_value': '0.00',
-            'max_value': '0.20',
+            'max_value': '1.00',
             'default': '0.03',
             'decimals': 2,
             'step': 0.01,
-            'parentToggle': 'FaceExpressionNormalizeLipsEnableToggleBoth & FaceExpressionEnableToggleBoth & FaceExpressionLipsToggle',
+            'parentToggle': 'FaceExpressionNormalizeLipsEnableToggle & FaceExpressionEnableToggle',
             'requiredToggleValue': True,
             'help': 'Threshold value for Normalize Lips.'
-        }        
+        },
+        'FaceExpressionRetargetingEyesEnableToggle': {
+            'level': 2,
+            'label': 'Retargeting Eyes',
+            'default': False,
+            'parentToggle': 'FaceExpressionEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Adjusting or redirecting the gaze or movement of the eyes during the facial restoration process. It overrides the Animation Region settings, meaning that the Animation Region will be ignored.'
+        },
+        'FaceExpressionRetargetingEyesMultiplierDecimalSlider': {
+            'level': 3,
+            'label': 'Retargeting Eyes Multiplier',
+            'min_value': '0.00',
+            'max_value': '2.00',
+            'default': '1.00',
+            'decimals': 2,
+            'step': 0.01,
+            'parentToggle': 'FaceExpressionRetargetingEyesEnableToggle & FaceExpressionEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Multiplier value for Retargeting Eyes.'
+        },
+        'FaceExpressionRetargetingLipsEnableToggle': {
+            'level': 2,
+            'label': 'Retargeting Lips',
+            'default': False,
+            'parentToggle': 'FaceExpressionEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Adjusting or modifying the position, shape, or movement of the lips during the facial restoration process. It overrides the Animation Region settings, meaning that the Animation Region will be ignored.'
+        },
+        'FaceExpressionRetargetingLipsMultiplierDecimalSlider': {
+            'level': 3,
+            'label': 'Retargeting Lips Multiplier',
+            'min_value': '0.00',
+            'max_value': '2.00',
+            'default': '1.00',
+            'decimals': 2,
+            'step': 0.01,
+            'parentToggle': 'FaceExpressionRetargetingLipsEnableToggle & FaceExpressionEnableToggle',
+            'requiredToggleValue': True,
+            'help': 'Multiplier value for Retargeting Lips.'
+        },
     },
     'ReF-LDM Denoiser': {
         'ReferenceKVTensorsSelection': {
@@ -290,7 +254,7 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'label': 'Reference K/V Tensors',
             'control_name': 'ReferenceKVTensorsSelection',
             'options': [], # Will be populated by _populate_reference_kv_tensors
-            'default': '', # Or a default filename if applicable
+            'default': "", # Or a default filename if applicable
             # Add any 'condition_control' or 'parentToggle' if needed
             'help': 'Select a Reference K/V Tensor file (*.pt). Files must be in "model_assets/reference_kv_data/".',
             'exec_function': lambda mw, val: mw.handle_reference_kv_file_change(val), # Trigger loading on UI change
@@ -301,7 +265,7 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ToggleButton',
             'label': 'Exclusive Reference Path',
             'control_name': 'UseReferenceExclusivePathToggle',
-            'default': True,
+            'default': False,
             'help': 'If enabled, forces the UNet to use only reference K/V for attention, maximizing focus on the reference features.'
         },
         'DenoiserBaseSeedSlider': {
@@ -309,7 +273,7 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterSlider',
             'label': 'Base Seed',
             'control_name': 'DenoiserBaseSeedSlider',
-            'min_value': '0', 'max_value': '300', 'default': '0', 'step': 1,
+            'min_value': '0', 'max_value': '999999', 'default': '220', 'step': 1,
             'help': 'Set a fixed base seed for the denoiser. This seed will be used for all frames and both denoiser passes (if applicable) to ensure consistent noise patterns.'
         },
         'DenoiserUNetEnableBeforeRestorersToggle': {
@@ -327,8 +291,8 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'SelectionBox',
             'label': 'Denoiser Mode (Before)',
             'control_name': 'DenoiserModeSelectionBefore',
-            'options': ['Single Step (Fast)', 'Full Restore (DDIM)'],
-            'default': 'Single Step (Fast)',
+            'options': ["Single Step (Fast)", "Full Restore (DDIM)"],
+            'default': "Single Step (Fast)",
             'parentToggle': 'DenoiserUNetEnableBeforeRestorersToggle',
             'requiredToggleValue': True,
             'help': 'Denoising mode for the pass before restorers. Single Step is generally faster.'
@@ -338,11 +302,11 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterSlider',
             'label': 'Single Step Timestep (t) (Before)',
             'control_name': 'DenoiserSingleStepTimestepSliderBefore',
-            'min_value': '0', 'max_value': '500', 'default': '500', 'step': 1, # Max value was 200, can be higher for single step
+            'min_value': '1', 'max_value': '999', 'default': '1', 'step': 1,
             'parentToggle': 'DenoiserUNetEnableBeforeRestorersToggle',
             'requiredToggleValue': True,
             'parentSelection': 'DenoiserModeSelectionBefore',
-            'requiredSelectionValue': 'Single Step (Fast)',
+            'requiredSelectionValue': "Single Step (Fast)",
             'help': 'Timestep for single-step denoising (Before Restorers). Lower values mean less noise added/removed.'
         },
         'DenoiserDDIMStepsSliderBefore': {
@@ -350,11 +314,11 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterSlider',
             'label': 'DDIM Steps (Before)',
             'control_name': 'DenoiserDDIMStepsSliderBefore',
-            'min_value': '5', 'max_value': '50', 'default': '5', 'step': 1,
+            'min_value': '10', 'max_value': '200', 'default': '20', 'step': 10,
             'parentToggle': 'DenoiserUNetEnableBeforeRestorersToggle',
             'requiredToggleValue': True,
             'parentSelection': 'DenoiserModeSelectionBefore',
-            'requiredSelectionValue': 'Full Restore (DDIM)',
+            'requiredSelectionValue': "Full Restore (DDIM)",
             'help': "Number of DDIM steps for full restoration (Before Restorers). Higher = more detail, slower."
         },
         'DenoiserCFGScaleDecimalSliderBefore': {
@@ -362,31 +326,31 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterDecimalSlider',
             'label': 'CFG Scale (Before)',
             'control_name': 'DenoiserCFGScaleDecimalSliderBefore',
-            'min_value': '0.0', 'max_value': '10.0', 'default': '1.0', 'step': 0.1, 'decimals': 1,
+            'min_value': '1.0', 'max_value': '10.0', 'default': '1.0', 'step': 0.1, 'decimals': 1,
             'parentToggle': 'DenoiserUNetEnableBeforeRestorersToggle',
             'requiredToggleValue': True,
             'parentSelection': 'DenoiserModeSelectionBefore',
-            'requiredSelectionValue': 'Full Restore (DDIM)',
+            'requiredSelectionValue': "Full Restore (DDIM)",
             'help': "Classifier-Free Guidance scale for DDIM (Before Restorers). Higher = stronger adherence to K/V."
         },
-        'DenoiserAfterFirstRestorersToggle': {
+        'DenoiserAfterFirstRestorerToggle': {
             'level': 1,
             'widget_type': 'ToggleButton',
-            'label': 'Enable Denoiser After first Restorers',
-            'control_name': 'DenoiserAfterFirstRestorersToggle',
+            'label': 'Enable Denoiser After first Restorer',
+            'control_name': 'DenoiserAfterFirstRestorerToggle',
             'default': False,
             'help': 'Apply the UNet Denoiser again after first restorer have been applied. Uses the same UNet model and step settings.',
             'exec_function': control_actions.handle_denoiser_state_change,
-            'exec_function_args': ['DenoiserAfterFirstRestorersToggle'],
+            'exec_function_args': ['DenoiserAfterFirstRestorerToggle'],
         },
         'DenoiserModeSelectionAfterFirst': {
             'level': 2,
             'widget_type': 'SelectionBox',
             'label': 'Denoiser Mode (After)',
             'control_name': 'DenoiserModeSelectionAfterFirst',
-            'options': ['Single Step (Fast)', 'Full Restore (DDIM)'],
-            'default': 'Single Step (Fast)',
-            'parentToggle': 'DenoiserAfterFirstRestorersToggle',
+            'options': ["Single Step (Fast)", "Full Restore (DDIM)"],
+            'default': "Single Step (Fast)",
+            'parentToggle': 'DenoiserAfterFirstRestorerToggle',
             'requiredToggleValue': True,
             'help': 'Denoising mode for the pass after first restorer. Single Step is generally faster.'
         },
@@ -395,11 +359,11 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterSlider',
             'label': 'Single Step Timestep (t) (After)',
             'control_name': 'DenoiserSingleStepTimestepSliderAfterFirst',
-            'min_value': '0', 'max_value': '500', 'default': '500', 'step': 1, # Max value was 200
-            'parentToggle': 'DenoiserAfterFirstRestorersToggle',
+            'min_value': '1', 'max_value': '999', 'default': '1', 'step': 1, # Max value was 200
+            'parentToggle': 'DenoiserAfterFirstRestorerToggle',
             'requiredToggleValue': True,
             'parentSelection': 'DenoiserModeSelectionAfterFirst',
-            'requiredSelectionValue': 'Single Step (Fast)',
+            'requiredSelectionValue': "Single Step (Fast)",
             'help': 'Timestep for single-step denoising (After first Restorer). Lower values mean less noise added/removed.'
         },
         'DenoiserDDIMStepsSliderAfterFirst': {
@@ -407,11 +371,11 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterSlider',
             'label': 'DDIM Steps (After First)',
             'control_name': 'DenoiserDDIMStepsSliderAfterFirst',
-            'min_value': '5', 'max_value': '50', 'default': '5', 'step': 1,
-            'parentToggle': 'DenoiserAfterFirstRestorersToggle',
+            'min_value': '10', 'max_value': '200', 'default': '20', 'step': 10,
+            'parentToggle': 'DenoiserAfterFirstRestorerToggle',
             'requiredToggleValue': True,
             'parentSelection': 'DenoiserModeSelectionAfterFirst',
-            'requiredSelectionValue': 'Full Restore (DDIM)',
+            'requiredSelectionValue': "Full Restore (DDIM)",
             'help': "Number of DDIM steps for full restoration (After First Restorer). Higher = more detail, slower."
         },
         'DenoiserCFGScaleDecimalSliderAfterFirst': {
@@ -419,11 +383,11 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterDecimalSlider',
             'label': 'CFG Scale (After First)',
             'control_name': 'DenoiserCFGScaleDecimalSliderAfterFirst',
-            'min_value': '0.0', 'max_value': '10.0', 'default': '1.0', 'step': 0.1, 'decimals': 1,
-            'parentToggle': 'DenoiserAfterFirstRestorersToggle',
+            'min_value': '1.0', 'max_value': '10.0', 'default': '1.0', 'step': 0.1, 'decimals': 1,
+            'parentToggle': 'DenoiserAfterFirstRestorerToggle',
             'requiredToggleValue': True,
             'parentSelection': 'DenoiserModeSelectionAfterFirst',
-            'requiredSelectionValue': 'Full Restore (DDIM)',
+            'requiredSelectionValue': "Full Restore (DDIM)",
             'help': "Classifier-Free Guidance scale for DDIM (After First Restorer). Higher = stronger adherence to K/V."
         },
         'DenoiserAfterRestorersToggle': {
@@ -434,15 +398,15 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'default': False,
             'help': 'Apply the UNet Denoiser again after face restorers have been applied. Uses the same UNet model and step settings.',
             'exec_function': control_actions.handle_denoiser_state_change,
-            'exec_function_args': ['DenoiserAfterRestorersToggle'],
+            'exec_function_args': ['DenoiserAfterFirstRestorerToggle'],
         },
         'DenoiserModeSelectionAfter': {
             'level': 2,
             'widget_type': 'SelectionBox',
             'label': 'Denoiser Mode (After)',
             'control_name': 'DenoiserModeSelectionAfter',
-            'options': ['Single Step (Fast)', 'Full Restore (DDIM)'],
-            'default': 'Single Step (Fast)',
+            'options': ["Single Step (Fast)", "Full Restore (DDIM)"],
+            'default': "Single Step (Fast)",
             'parentToggle': 'DenoiserAfterRestorersToggle',
             'requiredToggleValue': True,
             'help': 'Denoising mode for the pass after restorers. Single Step is generally faster.'
@@ -452,11 +416,11 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterSlider',
             'label': 'Single Step Timestep (t) (After)',
             'control_name': 'DenoiserSingleStepTimestepSliderAfter',
-            'min_value': '0', 'max_value': '500', 'default': '500', 'step': 1, # Max value was 200
+            'min_value': '1', 'max_value': '999', 'default': '1', 'step': 1, # Max value was 200
             'parentToggle': 'DenoiserAfterRestorersToggle',
             'requiredToggleValue': True,
             'parentSelection': 'DenoiserModeSelectionAfter',
-            'requiredSelectionValue': 'Single Step (Fast)',
+            'requiredSelectionValue': "Single Step (Fast)",
             'help': 'Timestep for single-step denoising (After Restorers). Lower values mean less noise added/removed.'
         },
         'DenoiserDDIMStepsSliderAfter': {
@@ -464,11 +428,11 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterSlider',
             'label': 'DDIM Steps (After)',
             'control_name': 'DenoiserDDIMStepsSliderAfter',
-            'min_value': '5', 'max_value': '50', 'default': '5', 'step': 1,
+            'min_value': '10', 'max_value': '200', 'default': '20', 'step': 10,
             'parentToggle': 'DenoiserAfterRestorersToggle',
             'requiredToggleValue': True,
             'parentSelection': 'DenoiserModeSelectionAfter',
-            'requiredSelectionValue': 'Full Restore (DDIM)',
+            'requiredSelectionValue': "Full Restore (DDIM)",
             'help': "Number of DDIM steps for full restoration (After Restorers). Higher = more detail, slower."
         },
         'DenoiserCFGScaleDecimalSliderAfter': {
@@ -476,11 +440,11 @@ COMMON_LAYOUT_DATA: LayoutDictTypes = {
             'widget_type': 'ParameterDecimalSlider',
             'label': 'CFG Scale (After)',
             'control_name': 'DenoiserCFGScaleDecimalSliderAfter',
-            'min_value': '0.0', 'max_value': '10.0', 'default': '1.0', 'step': 0.1, 'decimals': 1,
+            'min_value': '1.0', 'max_value': '10.0', 'default': '1.0', 'step': 0.1, 'decimals': 1,
             'parentToggle': 'DenoiserAfterRestorersToggle',
             'requiredToggleValue': True,
             'parentSelection': 'DenoiserModeSelectionAfter',
-            'requiredSelectionValue': 'Full Restore (DDIM)',
+            'requiredSelectionValue': "Full Restore (DDIM)",
             'help': "Classifier-Free Guidance scale for DDIM (After Restorers). Higher = stronger adherence to K/V."
         }
     }

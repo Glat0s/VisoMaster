@@ -1830,21 +1830,7 @@ def calc_combined_eye_ratio(c_d_eyes_i, source_lmk, device='cuda'):
     c_s_eyes = calc_eye_close_ratio(source_lmk[None])
     c_s_eyes_tensor = torch.from_numpy(c_s_eyes).float().to(device)
     #c_d_eyes_i_tensor = torch.Tensor([c_d_eyes_i[0][0]]).reshape(1, 1).to(device)
-    c_d_eyes_i_numpy_m = np.array([c_d_eyes_i[0][0]], dtype=np.float32)  # Assicurati che sia un array NumPy
-    c_d_eyes_i_numpy = np.array([max(c_d_eyes_i_numpy_m, 0.10)], dtype=np.float32) #Mini 0.1 otherwise eyelids overlap
-    c_d_eyes_i_tensor = torch.from_numpy(c_d_eyes_i_numpy).reshape(1, 1).to(device)
-    # [c_s,eyes, c_d,eyes,i]
-    combined_eye_ratio_tensor = torch.cat([c_s_eyes_tensor, c_d_eyes_i_tensor], dim=1)
-
-    return combined_eye_ratio_tensor
-    
-def calc_combined_eye_ratio_norm(c_d_eyes_i, source_lmk, device='cuda'):
-    c_s_eyes = calc_eye_close_ratio(source_lmk[None])
-    c_s_eyes_tensor = torch.from_numpy(c_s_eyes).float().to(device)
-    #c_d_eyes_i_tensor = torch.Tensor([c_d_eyes_i[0][0]]).reshape(1, 1).to(device)
-    c_d_eyes_i_numpy_l = np.array([c_d_eyes_i[0][0]], dtype=np.float32)  # Assicurati che sia un array NumPy
-    c_d_eyes_i_numpy_r = np.array([c_d_eyes_i[0][1]], dtype=np.float32)  # Assicurati che sia un array NumPy
-    c_d_eyes_i_numpy = np.array([max(min(c_d_eyes_i_numpy_l, c_d_eyes_i_numpy_r), 0.10)], dtype=np.float32) #Mini 0.1 otherwise eyelids overlap
+    c_d_eyes_i_numpy = np.array([c_d_eyes_i[0][0]], dtype=np.float32)  # Assicurati che sia un array NumPy
     c_d_eyes_i_tensor = torch.from_numpy(c_d_eyes_i_numpy).reshape(1, 1).to(device)
     # [c_s,eyes, c_d,eyes,i]
     combined_eye_ratio_tensor = torch.cat([c_s_eyes_tensor, c_d_eyes_i_tensor], dim=1)
@@ -1875,7 +1861,6 @@ def concat_feat(kp_source: torch.Tensor, kp_driving: torch.Tensor) -> torch.Tens
     assert bs_src == bs_dri, 'batch size must be equal'
 
     feat = torch.cat([kp_source.view(bs_src, -1), kp_driving.view(bs_dri, -1)], dim=1)
-    
     return feat
 
 def apply_laplace_filter(img):
@@ -1916,7 +1901,7 @@ def jpegBlur(img, q):
     img_blurred = img_blurred.to(device).type(torch.float32)
 
     return img_blurred
-    
+
 def histogram_matching(source_image, target_image, diffslider):
     # Determine the device (CPU or GPU)
     device = source_image.device
@@ -1926,7 +1911,6 @@ def histogram_matching(source_image, target_image, diffslider):
     target_image_t = target_image.float().to(device) / 255.0
 
     matched_target_image_t = target_image_t.clone()
-
     # Create bin edges for histograms
     bin_edges = torch.linspace(0.0, 1.0, steps=257, device=device)  # 257 edges for 256 bins
 
@@ -1974,6 +1958,7 @@ def histogram_matching(source_image, target_image, diffslider):
         source_cdf = torch.cumsum(source_pmf, dim=0)
         target_cdf = torch.cumsum(target_pmf, dim=0)
 
+        # Flatten the target channel for interpolation
         source_cdf = torch.maximum(source_cdf, torch.cummax(source_cdf, dim=0)[0])
         target_cdf = torch.maximum(target_cdf, torch.cummax(target_cdf, dim=0)[0])
 
@@ -2068,7 +2053,6 @@ def histogram_matching_withmask(source_image, target_image, mask, diffslider):
         source_pmf = source_hist / source_hist_sum
         target_pmf = target_hist / target_hist_sum
 
-
         #if smooth_strength1 != 0.5:        
             # 🔁 Smooth PMFs before computing CDFs        
             # Berechne Kernel-Werte dynamisch
@@ -2101,8 +2085,7 @@ def histogram_matching_withmask(source_image, target_image, mask, diffslider):
         # Re-enforce monotonicity again just in case
         source_cdf = torch.maximum(source_cdf, torch.cummax(source_cdf, dim=0)[0])
         target_cdf = torch.maximum(target_cdf, torch.cummax(target_cdf, dim=0)[0])
-        
-        
+
         # Flatten the target channel for interpolation
         target_channel_flat = target_channel.flatten()
 
@@ -2158,7 +2141,6 @@ def interp1d(x, xp, fp, device='cpu'):
 
     return y
 
-
 def interp1d_inverse(y, fp, xp, device='cpu'):
     assert torch.all(fp[1:] >= fp[:-1]), "fp must be increasing"
 
@@ -2182,7 +2164,6 @@ def interp1d_inverse(y, fp, xp, device='cpu'):
     x = torch.clamp(x, 0.0, 1.0)
 
     return x
-
 
 def histogram_matching_DFL_test(source_image, target_image, diffslider):
     # Converti i tensori Torch in array di tipo float32 e normalizza le immagini [0, 1]
