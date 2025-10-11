@@ -412,8 +412,8 @@ class FaceMasks:
                     if d > 0:
                         m_s = self._dilate_binary(m_s, d, mode)
                         m_o = self._dilate_binary(m_o, d, mode)
-                        if parameters.get("FaceParserBlendTextureSlider", 0):
-                            bl = parameters["FaceParserBlendTextureSlider"]/100.0
+                        if parameters.get("FaceParserBlurTextureSlider", 0):
+                            bl = parameters["FaceParserBlurTextureSlider"]/100.0
                             m_s = (m_s + bl).clamp(0,1)
                             m_o = (m_o + bl).clamp(0,1)
                         tex  = torch.maximum(tex,  m_s)
@@ -421,17 +421,31 @@ class FaceMasks:
                     elif d < 0:
                         m_s = self._dilate_binary(m_s, d, mode)
                         m_o = self._dilate_binary(m_o, d, mode)
-                        if parameters.get("FaceParserBlendTextureSlider", 0):
-                            bl = parameters["FaceParserBlendTextureSlider"]/100.0
+                        if parameters.get("FaceParserBlurTextureSlider", 0):
+                            bl = parameters["FaceParserBlurTextureSlider"]/100.0
                             m_s = (m_s + bl).clamp(0,1)
                             m_o = (m_o + bl).clamp(0,1)
                         sub = torch.maximum(m_s, m_o)
                         tex  = (tex  - sub).clamp_min(0)
                         tex_o = (tex_o - sub).clamp_min(0)
-
+                        
+            # Build combined texture mask
             comb = torch.minimum(1.0 - tex.clamp(0,1), 1.0 - tex_o.clamp(0,1))  # [256,256]
             comb = (to512_bi(comb.unsqueeze(0))).clamp(0,1)
-            result["texture_mask"] = comb  # [1,512,512]
+            
+            # Apply optional blur from Texture Mask Blur slider (FaceParserBlurTextureSlider)
+            blur_amount = parameters.get("FaceParserBlurTextureSlider", 0)
+            if blur_amount > 0:
+                blur_key = (blur_amount, (blur_amount + 1) * 0.2)
+                if not hasattr(self, "_blur_cache"):
+                    self._blur_cache = {}
+                if blur_key not in self._blur_cache:
+                    kernel_size = blur_amount * 2 + 1
+                    sigma = (blur_amount + 1) * 0.2
+                    self._blur_cache[blur_key] = transforms.GaussianBlur(kernel_size, sigma)
+                comb = self._blur_cache[blur_key](comb)
+
+            result["texture_mask"] = comb.clamp(0, 1)
 
         return result
         
