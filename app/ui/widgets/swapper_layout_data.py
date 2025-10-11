@@ -22,7 +22,7 @@ SWAPPER_LAYOUT_DATA: LayoutDictTypes = {
         },
         'SwapperResAutoSelectEnableToggle': {
             'level': 2,
-            'label': 'Enable Auto Resolution',
+            'label': 'Auto Resolution',
             'default': False,
             'parentSelection': 'SwapModelSelection',
             'requiredSelectionValue': 'Inswapper128',
