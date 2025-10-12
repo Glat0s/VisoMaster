@@ -412,8 +412,8 @@ class FaceMasks:
                     if d > 0:
                         m_s = self._dilate_binary(m_s, d, mode)
                         m_o = self._dilate_binary(m_o, d, mode)
-                        if parameters.get("FaceParserBlurTextureSlider", 0):
-                            bl = parameters["FaceParserBlurTextureSlider"]/100.0
+                        if parameters.get("FaceParserBlendTextureSlider", 0):
+                            bl = parameters["FaceParserBlendTextureSlider"]/100.0
                             m_s = (m_s + bl).clamp(0,1)
                             m_o = (m_o + bl).clamp(0,1)
                         tex  = torch.maximum(tex,  m_s)
@@ -421,8 +421,8 @@ class FaceMasks:
                     elif d < 0:
                         m_s = self._dilate_binary(m_s, d, mode)
                         m_o = self._dilate_binary(m_o, d, mode)
-                        if parameters.get("FaceParserBlurTextureSlider", 0):
-                            bl = parameters["FaceParserBlurTextureSlider"]/100.0
+                        if parameters.get("FaceParserBlendTextureSlider", 0):
+                            bl = parameters["FaceParserBlendTextureSlider"]/100.0
                             m_s = (m_s + bl).clamp(0,1)
                             m_o = (m_o + bl).clamp(0,1)
                         sub = torch.maximum(m_s, m_o)
